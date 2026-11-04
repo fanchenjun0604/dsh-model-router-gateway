@@ -1,0 +1,63 @@
+{
+  "name": "dsh-model-router-gateway",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness plugin: group every model DSH can reach into ordered fallback chains and expose them through an OpenAI-compatible gateway (BaseURL + key) for phones and other external clients.",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "model-routing",
+    "fallback",
+    "failover",
+    "openai-compatible",
+    "gateway",
+    "llm",
+    "plugin"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.1 <4"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

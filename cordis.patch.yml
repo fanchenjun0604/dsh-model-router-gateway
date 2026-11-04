@@ -1,0 +1,7 @@
+# dsh-model-router-gateway bundle patch.
+# One insert row mounts the Host half; the browser half is declared by the
+# dsh.client field in package.json and binds to this row.
+- insert:
+    - id: dsh-model-router-gateway
+      name: 'dsh-model-router-gateway'
+      config: {}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Router Gateway",
+    "description": "Group every model DSH can reach into ordered fallback chains, and expose them through an OpenAI-compatible gateway for phones and other clients."
+  }
+}
