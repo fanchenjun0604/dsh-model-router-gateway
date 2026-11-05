@@ -3,6 +3,14 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- Documentation only: `README.md` is now a single bilingual document (English
+  + full 中文 section) so npmjs.com — which renders one README — also shows
+  the Chinese docs. `README.zh.md` remains for the GitHub language link.
+
 ## 1.0.0 — 2026-11-04
 
 Initial public release.
@@ -22,5 +30,6 @@ Initial public release.
   key, and visibility — with persistence to a state file next to the profile.
 - Legacy path compatibility: requests under `/api/model-router/*` still reach
   the gateway.
-- Zero runtime dependencies (Node builtins + DSH services only); works on
-  desktop (Electron) and web deployments alike.
+- Self-contained runtime (`@deepseek-ai/schemastery` auto-installed; the rest
+  is Node builtins + DSH services); works on desktop (Electron) and web
+  deployments alike.
