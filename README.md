@@ -27,6 +27,9 @@ dsh plugin --profile <your-profile> add dsh-model-router-gateway
 
 (`--profile web` on a web deployment; on the desktop app use your profile name.) The plugin activates without a restart on both desktop and web — installing or upgrading through the DSH plugin manager / Settings → Plugins is enough.
 
+Upgrades need no terminal at all: the management card has **检查更新 / 升级** built in (since 1.0.3). It checks npm `latest` and swaps the plugin through the host's plugin manager; after the update lands the card reports it, prompting a restart only when the host says the new code needs one.
+
+
 ## Use
 
 1. Open the plugin card (Plugins page, or Settings → Plugins → Plugin settings).
@@ -144,6 +147,8 @@ dsh plugin --profile <你的profile> add dsh-model-router-gateway
 ```
 
 （Web 部署通常是 `--profile web`；桌面版用你的 profile 名。）桌面版和 Web 版都**无需重启**即可生效——在 DSH 插件管理 / 设置 → 插件 里安装或升级即可。
+
+后续升级更不用碰终端：管理卡片自带**检查更新 / 升级**（1.0.3 起），点一下就通过宿主插件管理器完成 remove → install 替换；升级完成后卡片会报告结果，仅当宿主明确提示新代码需要重启时才需要重启。远程部署（如 Unikraft）同样可以在浏览器里一键升级。
 
 ## 使用
 

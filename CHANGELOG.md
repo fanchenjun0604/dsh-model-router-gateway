@@ -3,6 +3,32 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.0.3 — 2026-11-06
+
+### Added
+
+- In-card self-update: **check for updates** compares the installed version
+  against npm `latest`, and **upgrade** runs remove → install through the
+  host's plugin manager right from the management card — no plugin page, no
+  terminal. A persisted marker lets the card report the outcome across the
+  remount the upgrade itself causes (including interrupted runs), and every
+  manager step is deadline-bounded. On deployments without an upgrade path
+  (no plugin manager in the composition) the card says so and points to the
+  plugin page. Works on remote web deployments too: upgrade the Unikraft
+  instance without leaving the browser.
+- Cooldown visibility: `/config` reports which models are currently cooling
+  and for how long; the card renders the chain chips with a ⏳ countdown and
+  a red tint, so the fallback order's live state is no longer a black box.
+- Chain ordering: models in a saved route can be moved up/down directly on
+  the chip row, and the edit form got the same ↑↓ buttons — re-tuning a
+  fallback order no longer means deleting and re-adding.
+- Copy buttons for BaseURL and the current gateway key.
+
+### Removed
+
+- `README.zh.md`: the bilingual single-page `README.md` (since 1.0.2) is now
+  the only documentation front, so the separate Chinese file no longer drifts.
+
 ## 1.0.2 — 2026-11-06
 
 ### Security

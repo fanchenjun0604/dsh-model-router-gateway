@@ -469,6 +469,255 @@ function maskKey(key) {
 }
 
 // ---------------------------------------------------------------------------
+// self-update (card-driven upgrade through the host plugin manager)
+// ---------------------------------------------------------------------------
+
+function readInstalledVersion() {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+    );
+    if (pkg && pkg.name === NS && typeof pkg.version === 'string') return pkg.version;
+  } catch {
+    /* dev trees may differ; fall through */
+  }
+  return '0.0.0';
+}
+
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+function getPluginManager(ctx) {
+  try {
+    if (typeof ctx.get === 'function') {
+      const pm = ctx.get('pluginManager');
+      if (pm && typeof pm.installBundle === 'function' && typeof pm.removeBundle === 'function') {
+        return pm;
+      }
+    }
+  } catch {
+    /* not injected in this composition */
+  }
+  try {
+    const pm = ctx.pluginManager;
+    if (pm && typeof pm.installBundle === 'function' && typeof pm.removeBundle === 'function') {
+      return pm;
+    }
+  } catch {
+    /* proxy trap */
+  }
+  return undefined;
+}
+
+async function fetchLatestFromRegistry(timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('registry request timed out')), timeoutMs);
+  try {
+    const res = await fetch(`https://registry.npmjs.org/${NS}/latest`, {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`registry HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data || typeof data.version !== 'string') throw new Error('registry answered without a version');
+    return data.version;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function refreshLatest(state) {
+  state.update.current = state.version;
+  state.update.checkedAt = Date.now();
+  try {
+    const latest = await fetchLatestFromRegistry();
+    state.update.latest = latest;
+    state.update.available = compareVersions(latest, state.version) > 0;
+    state.update.error = '';
+  } catch (error) {
+    state.update.error = String(error?.message ?? error);
+  }
+  return state.update;
+}
+
+function describeChange(result) {
+  const e = result?.error;
+  if (e === undefined || e === null) return String(result?.application ?? 'unknown');
+  if (typeof e === 'string') return e;
+  return String(e.message ?? e.code ?? JSON.stringify(e));
+}
+
+/** Persist the update intent beside the ordinary state so a remounted fiber can report the outcome. */
+function markPendingUpdate(patch) {
+  try {
+    const file = stateFilePath();
+    let current = {};
+    try {
+      current = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      /* fresh file */
+    }
+    current.pendingUpdate = patch;
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf8');
+    fs.renameSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Bound a manager operation so a wedged pnpm cannot hang the upgrade forever. */
+function withDeadline(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]);
+}
+
+function beginUpgrade(ctx, state) {
+  if (state.update.phase === 'removing' || state.update.phase === 'installing') {
+    return { started: false, reason: 'an update is already running' };
+  }
+  if (state.pending && state.pending.to && state.pending.to !== state.version) {
+    // A marker from a dead generation; allow retry, its own marker write
+    // overwrites it.
+    state.pending = null;
+  }
+  const manager = getPluginManager(ctx);
+  if (!manager) {
+    return {
+      started: false,
+      reason: 'pluginManager is unavailable in this composition — upgrade from the plugin manager page instead',
+    };
+  }
+  const from = state.version;
+  const to = state.update.latest;
+  if (!to) return { started: false, reason: 'no known latest version — run "check for updates" first' };
+  if (compareVersions(to, from) <= 0) {
+    return { started: false, reason: `installed ${from} is already at or ahead of ${to}` };
+  }
+
+  state.update.phase = 'removing';
+  state.update.message = 'removing the old version';
+  state.update.startedAt = Date.now();
+  state.update.error = '';
+  markPendingUpdate({ from, to, at: Date.now(), state: 'started' });
+
+  // Detached: the response flushes first, then the two manager operations run.
+  // The removal disposes this fiber mid-flight, but this closure keeps running
+  // to completion and records the outcome for the new generation to report.
+  (async () => {
+    try {
+      const removed = await withDeadline(
+        manager.removeBundle(NS),
+        60000,
+        'remove',
+      );
+      if (removed && removed.application === 'failed') {
+        throw new Error(`remove failed: ${describeChange(removed)}`);
+      }
+      state.update.phase = 'installing';
+      state.update.message = `installing ${to}`;
+      const installed = await withDeadline(
+        manager.installBundle(`${NS}@${to}`),
+        120000,
+        `install ${NS}@${to}`,
+      );
+      if (installed && installed.application === 'failed') {
+        throw new Error(`install failed: ${describeChange(installed)}`);
+      }
+      const application = installed ? installed.application : 'unknown';
+      state.update.phase = application === 'restart-required' ? 'restart-required' : 'done';
+      state.update.message = `upgraded ${from} → ${to} (${application})`;
+      markPendingUpdate({ from, to, at: Date.now(), state: 'done', application });
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      state.update.phase = 'failed';
+      state.update.message = message;
+      state.update.error = message;
+      markPendingUpdate({ from, to, at: Date.now(), state: 'failed', error: message });
+    }
+  })().catch(() => {
+    /* the journal above already recorded what we know */
+  });
+
+  return { started: true };
+}
+
+/** Remove the pendingUpdate marker from the state file once reported. */
+function consumePendingMarker() {
+  try {
+    const file = stateFilePath();
+    const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!current || current.pendingUpdate === undefined) return;
+    delete current.pendingUpdate;
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf8');
+    fs.renameSync(tmp, file);
+  } catch {
+    /* best effort */
+  }
+}
+
+/**
+ * The card-facing update state. A pending marker left by a self-update is
+ * judged against this fiber's own version: the new generation proves the
+ * upgrade landed and consumes the marker; the old generation holding a
+ * started marker whose closure is gone means the run died — surface it as
+ * interrupted and let the user retry.
+ */
+function updateView(state) {
+  const live = state.update;
+  const base = {
+    current: state.version,
+    latest: live.latest,
+    available: live.available,
+    checkedAt: live.checkedAt,
+    error: live.error,
+    phase: live.phase,
+    message: live.message,
+  };
+  const pu = state.pending;
+  if (!pu) return base;
+  if (pu.to && pu.to === state.version) {
+    consumePendingMarker();
+    state.pending = null;
+    return { ...base, latest: pu.to, available: false, phase: 'done', message: `upgraded ${pu.from ?? '?'} → ${pu.to}` };
+  }
+  if (live.phase === 'removing' || live.phase === 'installing') return base;
+  if (pu.state === 'failed') {
+    consumePendingMarker();
+    state.pending = null;
+    return { ...base, phase: 'failed', message: String(pu.error ?? 'the previous update failed'), error: String(pu.error ?? 'update failed') };
+  }
+  // 'started' marker, version not ours yet. Fresh markers are judged live:
+  // the previous generation's detached closure may still be installing, so
+  // only an aged marker is truly interrupted.
+  const markerAge = Date.now() - Number(pu.at || 0);
+  if (markerAge < 300000) {
+    return { ...base, latest: pu.to || base.latest, phase: 'installing', message: `upgrade to ${pu.to || '?'} in progress` };
+  }
+  return {
+    ...base,
+    latest: pu.to || base.latest,
+    phase: 'interrupted',
+    message: `the update to ${pu.to || '?'} did not complete — check again and retry`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // HTTP handler
 // ---------------------------------------------------------------------------
 
@@ -532,6 +781,13 @@ function makeHandler(ctx, state) {
           maxRetryPerModel: state.maxRetry,
           failureCooldownMs: state.failureCooldownMs,
         },
+        cooldowns: [...state.failures.entries()]
+          .filter(([, until]) => until > Date.now())
+          .map(([key, until]) => ({
+            model: key,
+            remainingSec: Math.ceil((until - Date.now()) / 1000),
+          })),
+        update: updateView(state),
         routes: [...routes.values()],
         providers,
       });
@@ -604,6 +860,26 @@ function makeHandler(ctx, state) {
           failureCooldownMs: state.failureCooldownMs,
         },
       });
+      return;
+    }
+
+  // ----- admin update: check / start / status -----
+    if (pathname === PRIMARY + '/admin/update/check' && (req.method === 'POST' || req.method === 'GET')) {
+      const view = await refreshLatest(state);
+      json(res, 200, { ok: true, update: view });
+      return;
+    }
+    if (pathname === PRIMARY + '/admin/update' && req.method === 'POST') {
+      const out = beginUpgrade(ctx, state);
+      json(res, out.started ? 202 : 409, {
+        ok: out.started,
+        update: updateView(state),
+        ...(out.reason ? { reason: out.reason } : {}),
+      });
+      return;
+    }
+    if (pathname === PRIMARY + '/admin/update' && req.method === 'GET') {
+      json(res, 200, { ok: true, update: updateView(state) });
       return;
     }
 
@@ -984,6 +1260,18 @@ export function apply(ctx, config) {
     publicPort,
     modelVisibility,
     failures: new Map(),
+    version: readInstalledVersion(),
+    pending: null,
+    update: {
+      current: readInstalledVersion(),
+      latest: '',
+      available: false,
+      checkedAt: 0,
+      error: '',
+      phase: 'idle',
+      message: '',
+      startedAt: 0,
+    },
     ctx,
   };
 
@@ -1024,6 +1312,14 @@ export function apply(ctx, config) {
       if (typeof s.failureCooldownMs === 'number' && s.failureCooldownMs >= 0) {
         state.failureCooldownMs = Math.floor(s.failureCooldownMs);
       }
+    }
+    // A self-update in flight or just finished. The marker is judged lazily on
+    // the next trusted /config read, not here: installBundle creates this very
+    // fiber before the previous generation can write its outcome, and this
+    // generation's version is itself the proof that the upgrade landed.
+    const pu = saved.pendingUpdate;
+    if (pu && typeof pu === 'object' && typeof pu.state === 'string') {
+      state.pending = { ...pu };
     }
   }
 

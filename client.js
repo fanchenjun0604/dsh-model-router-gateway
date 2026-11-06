@@ -134,6 +134,10 @@ window.__ModuleLoader__.load({
       });
       const [open, setOpen] = useState(view === 'page');
       const [saving, setSaving] = useState(false);
+      const [update, setUpdate] = useState(null);
+      const [cooldowns, setCooldowns] = useState([]);
+      const [checking, setChecking] = useState(false);
+      const [copied, setCopied] = useState('');
 
       const load = useCallback(async () => {
         setLoading(true);
@@ -144,6 +148,8 @@ window.__ModuleLoader__.load({
           setRoutes(Array.isArray(data.routes) ? data.routes : []);
           setProviders(Array.isArray(data.providers) ? data.providers : []);
           setKeyDraft(data.masked ? '' : data.gatewayKey || '');
+          if (data.update) setUpdate(data.update);
+          setCooldowns(Array.isArray(data.cooldowns) ? data.cooldowns : []);
           const st = data.settings || {};
           setSettingsDraft({
             defaultTimeoutMs: typeof st.defaultTimeoutMs === 'number' ? st.defaultTimeoutMs : 60000,
@@ -285,6 +291,96 @@ window.__ModuleLoader__.load({
         } catch (e) {
           setError(e && e.message ? e.message : String(e));
         }
+      }
+
+      // ---------------- chain ordering ----------------
+
+      async function moveRouteModel(route, index, dir) {
+        const models = (route.models || []).slice();
+        const j = index + dir;
+        if (j < 0 || j >= models.length) return;
+        const t = models[index];
+        models[index] = models[j];
+        models[j] = t;
+        try {
+          await fetchJson(BASE + '/admin/routes/' + encodeURIComponent(route.id), {
+            method: 'PUT',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${savedKey}`,
+            },
+            body: JSON.stringify({ models }),
+          });
+          await load();
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e));
+        }
+      }
+
+      function moveDraft(index, dir) {
+        const next = draftModels.slice();
+        const j = index + dir;
+        if (j < 0 || j >= next.length) return;
+        const t = next[index];
+        next[index] = next[j];
+        next[j] = t;
+        setDraftModels(next);
+      }
+
+      // ---------------- self update ----------------
+
+      async function checkUpdate() {
+        setChecking(true);
+        setError('');
+        try {
+          const data = await fetchJson(BASE + '/admin/update/check', {
+            method: 'POST',
+            headers: { authorization: `Bearer ${savedKey}` },
+          });
+          setUpdate(data.update);
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e));
+        } finally {
+          setChecking(false);
+        }
+      }
+
+      async function startUpgrade() {
+        if (typeof globalThis !== 'undefined' && typeof globalThis.confirm === 'function') {
+          if (!globalThis.confirm('立即升级到新版本？升级期间当前请求可能中断。')) return;
+        }
+        setError('');
+        try {
+          const data = await fetchJson(BASE + '/admin/update', {
+            method: 'POST',
+            headers: { authorization: `Bearer ${savedKey}` },
+          });
+          setUpdate(data.update);
+          if (!data.ok) setError(data.reason || 'upgrade refused');
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e));
+        }
+      }
+
+      // ---------------- copy helpers ----------------
+
+      function copyText(label, value) {
+        try {
+          const nav = typeof globalThis !== 'undefined' ? globalThis.navigator : undefined;
+          if (nav && nav.clipboard && nav.clipboard.writeText) {
+            nav.clipboard.writeText(value).then(
+              () => {
+                setCopied(label);
+                setTimeout(() => setCopied(''), 1500);
+              },
+              () => setError('复制失败 / copy failed'),
+            );
+            return;
+          }
+        } catch {
+          /* fall through */
+        }
+        setError('当前环境不支持剪贴板');
       }
 
       // ---------------- visibility ----------------
@@ -430,7 +526,10 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.card },
           h('div', { style: { fontWeight: 600, marginBottom: 6 } }, '网关地址与 Key / Gateway URL & Key'),
           h('div', { style: styles.label }, 'BaseURL'),
-          h('input', { readOnly: true, value: phoneBase, style: styles.input }),
+          h('div', { style: styles.row },
+            h('input', { readOnly: true, value: phoneBase, style: { ...styles.input, flex: 1 } }),
+            h('button', { type: 'button', style: styles.btn, onClick: () => copyText('base', phoneBase) }, copied === 'base' ? '已复制' : '复制'),
+          ),
           publicPort > 0 && lanIp
             ? h('div', { style: { ...styles.muted, marginTop: 4 } },
                 `本机调试 / local: http://127.0.0.1:${publicPort}/v1`)
@@ -447,6 +546,9 @@ window.__ModuleLoader__.load({
                 : 'sk-... or any string',
               style: { ...styles.input, flex: 1, minWidth: 200 },
             }),
+            masked || !savedKey
+              ? null
+              : h('button', { type: 'button', style: styles.btn, onClick: () => copyText('key', savedKey) }, copied === 'key' ? '已复制' : '复制当前'),
           ),
           h('div', { style: { ...styles.muted, marginTop: 6 } },
             masked
@@ -524,9 +626,38 @@ window.__ModuleLoader__.load({
                   ),
                 ),
                 h('div', { style: { marginTop: 6, flexWrap: 'wrap' } },
-                  (route.models || []).map((m, i) =>
-                    h('span', { key: i, style: styles.chip }, `${m.provider}/${m.model}`),
-                  ),
+                  (route.models || []).map((m, i) => {
+                    const key = `${m.provider}/${m.model}`;
+                    const cooling = (cooldowns || []).find((c) => c.model === key);
+                    return h('span', {
+                      key: i,
+                      style: {
+                        ...styles.chip,
+                        ...(cooling ? { background: 'rgba(220,38,38,0.12)', color: '#dc2626' } : {}),
+                      },
+                      title: cooling ? `冷却中 ${cooling.remainingSec}s` : key,
+                    }, [
+                      `${i + 1}. ${m.provider}/${m.model}${cooling ? ` ⏳${cooling.remainingSec}s` : ''}`,
+                      masked
+                        ? null
+                        : h('button', {
+                            type: 'button',
+                            'aria-label': '上移',
+                            disabled: i === 0,
+                            onClick: (e) => { e.stopPropagation(); moveRouteModel(route, i, -1); },
+                            style: { border: 'none', background: 'transparent', cursor: i === 0 ? 'default' : 'pointer', opacity: i === 0 ? 0.3 : 0.7, fontSize: 11, marginLeft: 2 },
+                          }, '↑'),
+                      masked
+                        ? null
+                        : h('button', {
+                            type: 'button',
+                            'aria-label': '下移',
+                            disabled: i === route.models.length - 1,
+                            onClick: (e) => { e.stopPropagation(); moveRouteModel(route, i, 1); },
+                            style: { border: 'none', background: 'transparent', cursor: i === route.models.length - 1 ? 'default' : 'pointer', opacity: i === route.models.length - 1 ? 0.3 : 0.7, fontSize: 11 },
+                          }, '↓'),
+                    ]);
+                  }),
                 ),
               ),
             ),
@@ -587,6 +718,20 @@ window.__ModuleLoader__.load({
                   ? h('option', { value: m.model }, m.model)
                   : null,
               ),
+              h('button', {
+                type: 'button',
+                style: styles.btn,
+                'aria-label': '上移',
+                disabled: i === 0,
+                onClick: () => moveDraft(i, -1),
+              }, '↑'),
+              h('button', {
+                type: 'button',
+                style: styles.btn,
+                'aria-label': '下移',
+                disabled: i === draftModels.length - 1,
+                onClick: () => moveDraft(i, 1),
+              }, '↓'),
               h('button', {
                 type: 'button',
                 style: styles.btn,
@@ -669,6 +814,46 @@ window.__ModuleLoader__.load({
             );
           }),
         ),
+
+        // -------- self update --------
+        masked
+          ? null
+          : h('div', { style: { ...styles.card, marginTop: 12 } },
+              h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+                h('div', { style: { fontWeight: 600 } }, '插件更新 / Plugin update'),
+                h('div', { style: styles.row },
+                  h('span', { style: styles.muted },
+                    update && update.current ? `v${update.current}` : 'v?'),
+                  h('button', {
+                    type: 'button',
+                    style: styles.btn,
+                    onClick: checkUpdate,
+                    disabled: checking || (update && (update.phase === 'removing' || update.phase === 'installing')),
+                  }, checking ? '检查中…' : '检查更新'),
+                  update && update.available
+                    ? h('button', {
+                        type: 'button',
+                        style: styles.btnPrimary,
+                        onClick: startUpgrade,
+                      }, `升级到 v${update.latest}`)
+                    : null,
+                ),
+              ),
+              update && update.latest && !update.available && update.phase === 'idle'
+                ? h('div', { style: { ...styles.muted, marginTop: 6 } },
+                    update.error ? `检查失败：${update.error}` : `已是最新版本（v${update.current}）`)
+                : null,
+              update && (update.phase === 'removing' || update.phase === 'installing')
+                ? h('div', { style: { ...styles.muted, marginTop: 6, color: '#b45309' } },
+                    `${update.message || '升级中'}… 请勿刷新页面`)
+                : null,
+              update && (update.phase === 'done' || update.phase === 'restart-required' || update.phase === 'failed' || update.phase === 'interrupted')
+                ? h('div', { style: { ...styles.muted, marginTop: 6, color: update.phase === 'failed' || update.phase === 'interrupted' ? '#dc2626' : '#059669' } },
+                    update.phase === 'restart-required'
+                      ? `${update.message || '升级完成'}；需重启 DSH 后新代码生效。`
+                      : update.message || '')
+                : null,
+            ),
 
         h('div', { style: { ...styles.muted, marginTop: 10 } },
           `调用 / Call: POST ${phoneBase}/chat/completions，model 填路由组 ID 或 provider:model。`),
