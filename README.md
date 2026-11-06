@@ -25,7 +25,7 @@ Built for the common reality of free / quota-limited model channels: when model 
 dsh plugin --profile <your-profile> add dsh-model-router-gateway
 ```
 
-(`--profile web` on a web deployment; on the desktop app use your profile name.) Then restart / reload the profile.
+(`--profile web` on a web deployment; on the desktop app use your profile name.) The plugin activates without a restart on both desktop and web — installing or upgrading through the DSH plugin manager / Settings → Plugins is enough.
 
 ## Use
 
@@ -43,7 +43,13 @@ dsh plugin --profile <your-profile> add dsh-model-router-gateway
 
 ### Define routes
 
-In the card, add a route group and list models in priority order. Or declare defaults in your profile's `cordis.patch.yml`:
+In the card, add a route group and list models in priority order. Route ids
+are the addressing contract clients type into `model`: pick them deliberately
+at creation (`default`, `fast`, `coding` — pattern `[A-Za-z0-9][A-Za-z0-9_.-]`);
+they are fixed afterwards because every client refers to them. Leave the id
+blank and the card derives one from the name. Completions echo the model that
+actually answered in the `model` field. Or declare defaults in your profile's
+`cordis.patch.yml`:
 
 ```yaml
 - patch:
@@ -71,20 +77,24 @@ Note: once you edit routes in the UI, the persisted state file takes precedence 
 | `publicPort` | `0` (off) | Extra listener on `0.0.0.0` for LAN / phone access. |
 | `defaultTimeoutMs` | `60000` | Per-model request timeout before falling over to the next. |
 | `maxRetryPerModel` | `1` | Retries against one model before moving down the chain. |
+| `failureCooldownMs` | `60000` | After a model fails end-to-end, the chain skips it directly for this long instead of burning a fresh timeout; a success clears the mark. `0` disables. |
 | `modelVisibility` | `{}` (all visible) | Per-provider allow-list of model ids shown in `/v1/models`. |
 | `routes` | `[]` | Ordered fallback route groups. |
 
-State file: `<profile dir>/dsh-model-router-gateway-state.json`.
+State file: `<profile dir>/dsh-model-router-gateway-state.json`. The three
+runtime knobs (timeout / retries / cooldown) are also editable in the
+management card under **Advanced**.
 
 ## How the failover works
 
-Every DSH model stream ends in a terminal chunk: success, or a typed failure (`QUOTA`, `RATE_LIMIT`, `AUTH`, `SERVER`, `TIMEOUT`, …). The gateway treats any failure **before the first token**, a timeout, or an empty answer as "this model is unavailable right now" and moves to the next entry in the route — transparently, keeping the same conversation. Usage accounting (`prompt_tokens`/`completion_tokens`) is estimated in characters, since upstream free channels rarely report tokens.
+Every DSH model stream ends in a terminal chunk: success, or a typed failure (`QUOTA`, `RATE_LIMIT`, `AUTH`, `SERVER`, `TIMEOUT`, …). The gateway treats any failure **before the first token**, a timeout, or an empty answer as "this model is unavailable right now" and moves to the next entry in the route — transparently, keeping the same conversation. A model that fails end-to-end then enters a short **cooldown** (`failureCooldownMs`, default 60s): the next request skips it directly instead of burning another timeout, and any success clears the mark. Usage accounting (`prompt_tokens`/`completion_tokens`) is estimated in characters, since upstream free channels rarely report tokens.
 
 ## Security notes
 
 - Keep the gateway key secret: anyone holding it can spend your model quota. The key is stored in the plugin state file next to your profile.
+- On public deployments the `/config` surface answers anonymous callers with a **masked view** (key redacted, model lists trimmed), and admin mutations additionally require the host's local/authenticated session — a bare gateway key from off-box cannot manage the gateway. Calling `/v1/*` with the key still works from anywhere, by design. Rotate the key if it was ever exposed (1.0.1 and earlier answered `/config` unmasked).
 - Binding `publicPort` opens the gateway on every interface of the host. Only do this behind a firewall, reverse proxy with TLS, or on trusted networks.
-- Requests are forwarded to providers exactly as DSH would send them; images are replaced by text placeholders (text-only forwarding).
+- Requests are forwarded to providers exactly as DSH would send them; images are replaced by text placeholders (text-only forwarding). Tool/function calling is not forwarded yet.
 
 ## Development
 
@@ -133,7 +143,7 @@ MIT
 dsh plugin --profile <你的profile> add dsh-model-router-gateway
 ```
 
-（Web 部署通常是 `--profile web`；桌面版用你的 profile 名。）装完重启/重载 profile。
+（Web 部署通常是 `--profile web`；桌面版用你的 profile 名。）桌面版和 Web 版都**无需重启**即可生效——在 DSH 插件管理 / 设置 → 插件 里安装或升级即可。
 
 ## 使用
 
@@ -157,22 +167,26 @@ dsh plugin --profile <你的profile> add dsh-model-router-gateway
 | `publicPort` | `0`（关闭） | 在 `0.0.0.0` 额外监听，供局域网/手机访问。 |
 | `defaultTimeoutMs` | `60000` | 单模型超时，超时即降级到下一个。 |
 | `maxRetryPerModel` | `1` | 单模型失败后的重试次数，再往下走链条。 |
+| `failureCooldownMs` | `60000` | 模型整链失败后进入冷却，期间路由直接跳过它，不再空烧超时；成功一次即清除。`0` 关闭。 |
 | `modelVisibility` | `{}`（全部可见） | 各提供商对外可见的模型 id 白名单。 |
 | `routes` | `[]` | 顺序降级路由组。 |
 
-状态文件：`<profile 目录>/dsh-model-router-gateway-state.json`。
+状态文件：`<profile 目录>/dsh-model-router-gateway-state.json`。超时/重试/冷却三个运行参数也可在管理卡片"高级设置"里修改，随状态文件持久化。
+
+路由组 ID 就是手机端 `model` 字段要填的寻址名：创建时定好（如 `default`、`fast`、`coding`，规则 `[A-Za-z0-9][A-Za-z0-9_.-]`），之后不可改；留空会自动按名称生成。响应体的 `model` 字段会回显实际作答的模型。
 
 注意：一旦在界面上编辑过路由，持久化的状态文件优先于 patch 默认值。
 
 ## 降级原理
 
-DSH 的每个模型流都以终结 chunk 收尾：成功，或带类型失败（`QUOTA`、`RATE_LIMIT`、`AUTH`、`SERVER`、`TIMEOUT`…）。网关把 **首 token 之前** 的任何失败、超时、空回答视为"该模型当前不可用"，自动切到路由里的下一个模型，对话无感知。token 用量按字符估算（上游免费渠道通常不回报真实值）。
+DSH 的每个模型流都以终结 chunk 收尾：成功，或带类型失败（`QUOTA`、`RATE_LIMIT`、`AUTH`、`SERVER`、`TIMEOUT`…）。网关把 **首 token 之前** 的任何失败、超时、空回答视为"该模型当前不可用"，自动切到路由里的下一个模型，对话无感知。整链失败的模型随后进入短暂**冷却**（`failureCooldownMs`，默认 60 秒）：期间新请求直接跳过它，不再空烧一轮超时，成功一次即解除。token 用量按字符估算（上游免费渠道通常不回报真实值）。
 
 ## 安全提示
 
 - 网关 Key 即额度：持有者可以消耗你的模型配额，请妥善保管（它存在 profile 旁的状态文件里）。
+- 公网部署下 `/config` 对匿名请求只返回**掩码视图**（Key 打码、模型清单裁剪）；管理类写操作还额外要求本机/已登录会话——只有网关 Key 的站外请求无法改配置。用 Key 正常调用 `/v1/*` 不受影响，这是设计本意。若 Key 曾暴露请轮换（1.0.1 及更早版本的 `/config` 不打码）。
 - 开放 `publicPort` 等于对主机所有网卡开放网关，请配合防火墙、TLS 反代或仅在可信网络使用。
-- 请求按 DSH 原样转发给提供商；图片消息替换为文本占位（当前仅转发文本）。
+- 请求按 DSH 原样转发给提供商；图片消息替换为文本占位（当前仅转发文本），tool/function calling 暂未转发。
 
 ## 许可
 

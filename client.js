@@ -124,8 +124,14 @@ window.__ModuleLoader__.load({
       const [visibility, setVisibility] = useState({});
       const [expanded, setExpanded] = useState({});
       const [editing, setEditing] = useState(null);
+      const [draftId, setDraftId] = useState('');
       const [draftName, setDraftName] = useState('');
       const [draftModels, setDraftModels] = useState([{ provider: '', model: '' }]);
+      const [settingsDraft, setSettingsDraft] = useState({
+        defaultTimeoutMs: 60000,
+        maxRetryPerModel: 1,
+        failureCooldownMs: 60000,
+      });
       const [open, setOpen] = useState(view === 'page');
       const [saving, setSaving] = useState(false);
 
@@ -137,7 +143,13 @@ window.__ModuleLoader__.load({
           setConfig(data);
           setRoutes(Array.isArray(data.routes) ? data.routes : []);
           setProviders(Array.isArray(data.providers) ? data.providers : []);
-          setKeyDraft(data.gatewayKey || '');
+          setKeyDraft(data.masked ? '' : data.gatewayKey || '');
+          const st = data.settings || {};
+          setSettingsDraft({
+            defaultTimeoutMs: typeof st.defaultTimeoutMs === 'number' ? st.defaultTimeoutMs : 60000,
+            maxRetryPerModel: typeof st.maxRetryPerModel === 'number' ? st.maxRetryPerModel : 1,
+            failureCooldownMs: typeof st.failureCooldownMs === 'number' ? st.failureCooldownMs : 60000,
+          });
           const vis = {};
           const raw = data.modelVisibility || {};
           for (const [pid, list] of Object.entries(raw)) {
@@ -155,7 +167,8 @@ window.__ModuleLoader__.load({
         load();
       }, [load]);
 
-      const savedKey = config && config.gatewayKey ? config.gatewayKey : '';
+      const masked = !!(config && config.masked);
+      const savedKey = masked ? '' : config && config.gatewayKey ? config.gatewayKey : '';
       const origin =
         typeof globalThis !== 'undefined' && globalThis.location
           ? globalThis.location.origin
@@ -176,18 +189,28 @@ window.__ModuleLoader__.load({
 
       function resetDraft() {
         setEditing(null);
+        setDraftId('');
         setDraftName('');
         setDraftModels([{ provider: '', model: '' }]);
       }
 
       function startEdit(route) {
         setEditing(route);
+        setDraftId(route.id || '');
         setDraftName(route.name || '');
         const models = Array.isArray(route.models) && route.models.length
           ? route.models.map((m) => ({ provider: m.provider || '', model: m.model || '' }))
           : [{ provider: '', model: '' }];
         setDraftModels(models);
         setOpen(true);
+      }
+
+      function suggestId(name) {
+        return String(name || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 40);
       }
 
       async function saveRoute() {
@@ -215,10 +238,15 @@ window.__ModuleLoader__.load({
               body: JSON.stringify({ name, models }),
             });
           } else {
+            const id = draftId.trim() || suggestId(name);
+            if (!id) {
+              setError('请填写路由 ID，或输入一个英文/数字名称自动生成');
+              return;
+            }
             await fetchJson(BASE + '/admin/routes', {
               method: 'POST',
               headers,
-              body: JSON.stringify({ name, models }),
+              body: JSON.stringify({ id, name, models }),
             });
           }
           resetDraft();
@@ -326,16 +354,23 @@ window.__ModuleLoader__.load({
         setSaving(true);
         setError('');
         try {
+          const body = {
+            modelVisibility: normalizeVisibility(),
+            settings: {
+              defaultTimeoutMs: Number(settingsDraft.defaultTimeoutMs) || 60000,
+              maxRetryPerModel: Number(settingsDraft.maxRetryPerModel) || 0,
+              failureCooldownMs: Number(settingsDraft.failureCooldownMs) || 0,
+            },
+          };
+          const k = keyDraft.trim();
+          if (k) body.gatewayKey = k;
           await fetchJson(BASE + '/admin/settings', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
               authorization: `Bearer ${savedKey}`,
             },
-            body: JSON.stringify({
-              gatewayKey: keyDraft.trim(),
-              modelVisibility: normalizeVisibility(),
-            }),
+            body: JSON.stringify(body),
           });
           await load();
         } catch (e) {
@@ -404,14 +439,60 @@ window.__ModuleLoader__.load({
             '外部访问 Key（可自定义，任意字符串） / Gateway key (any string)'),
           h('div', { style: styles.row },
             h('input', {
-              value: keyDraft,
+              value: masked ? '' : keyDraft,
               onChange: (e) => setKeyDraft(e.target.value),
-              placeholder: 'sk-... or any string',
+              disabled: masked,
+              placeholder: masked
+                ? '••••（匿名视图，无法查看/修改）'
+                : 'sk-... or any string',
               style: { ...styles.input, flex: 1, minWidth: 200 },
             }),
           ),
           h('div', { style: { ...styles.muted, marginTop: 6 } },
-            '客户端填 BaseURL + Key（Authorization: Bearer <Key>），改完点下方“保存设置”。'),
+            masked
+              ? '当前为受限视图：完整 Key 与编辑功能只在 DSH 本机或已登录会话中开放。'
+              : '客户端填 BaseURL + Key（Authorization: Bearer <Key>），改完点下方"保存设置"。'),
+          // -------- advanced knobs --------
+          masked
+            ? null
+            : h('div', { style: { fontWeight: 600, margin: '12px 0 6px' } }, '高级设置 / Advanced'),
+          masked
+            ? null
+            : h('div', { style: styles.row },
+            h('div', { style: { flex: 1, minWidth: 150 } },
+              h('div', { style: styles.label }, '单模型超时(ms) / Timeout'),
+              h('input', {
+                type: 'number',
+                min: 1000,
+                value: settingsDraft.defaultTimeoutMs,
+                onChange: (e) => setSettingsDraft({ ...settingsDraft, defaultTimeoutMs: e.target.value }),
+                style: styles.input,
+              }),
+            ),
+            h('div', { style: { flex: 1, minWidth: 150 } },
+              h('div', { style: styles.label }, '每模型重试 / Retry'),
+              h('input', {
+                type: 'number',
+                min: 0,
+                max: 5,
+                value: settingsDraft.maxRetryPerModel,
+                onChange: (e) => setSettingsDraft({ ...settingsDraft, maxRetryPerModel: e.target.value }),
+                style: styles.input,
+              }),
+            ),
+            h('div', { style: { flex: 1, minWidth: 150 } },
+              h('div', { style: styles.label }, '失败冷却(ms) / Cooldown'),
+              h('input', {
+                type: 'number',
+                min: 0,
+                value: settingsDraft.failureCooldownMs,
+                onChange: (e) => setSettingsDraft({ ...settingsDraft, failureCooldownMs: e.target.value }),
+                style: styles.input,
+              }),
+            ),
+          ),
+          h('div', { style: { ...styles.muted, marginTop: 6 } },
+            '模型失败后在冷却期内被路由直接跳过，不再浪费超时等待；0=关闭冷却。'),
         ),
 
         // -------- routes --------
@@ -427,13 +508,19 @@ window.__ModuleLoader__.load({
                       `${route.enabled === false ? '已禁用' : '运行中'} · ${(route.models || []).length} 个模型`),
                   ),
                   h('div', { style: styles.row },
-                    h('button', { type: 'button', style: styles.btn, onClick: () => startEdit(route) }, '编辑'),
-                    h('button', {
-                      type: 'button',
-                      style: styles.btn,
-                      onClick: () => toggleRoute(route),
-                    }, route.enabled === false ? '启用' : '禁用'),
-                    h('button', { type: 'button', style: styles.btnDanger, onClick: () => removeRoute(route) }, '删除'),
+                    masked
+                      ? null
+                      : h('button', { type: 'button', style: styles.btn, onClick: () => startEdit(route) }, '编辑'),
+                    masked
+                      ? null
+                      : h('button', {
+                          type: 'button',
+                          style: styles.btn,
+                          onClick: () => toggleRoute(route),
+                        }, route.enabled === false ? '启用' : '禁用'),
+                    masked
+                      ? null
+                      : h('button', { type: 'button', style: styles.btnDanger, onClick: () => removeRoute(route) }, '删除'),
                   ),
                 ),
                 h('div', { style: { marginTop: 6, flexWrap: 'wrap' } },
@@ -445,10 +532,19 @@ window.__ModuleLoader__.load({
             ),
 
         // -------- new / edit route --------
-        h('div', { style: { ...styles.card, marginTop: 12 } },
+        h('div', { style: { ...styles.card, marginTop: 12, display: masked ? 'none' : 'block' } },
           h('div', { style: { fontWeight: 600, marginBottom: 8 } },
             editing ? `编辑路由组：${editing.name || editing.id}` : '新建路由组 / New route group'),
-          h('div', { style: styles.label }, '名称 / Name'),
+          h('div', { style: styles.label },
+            editing ? 'ID（创建后不可修改，手机端以此寻址） / ID (fixed after create)' : 'ID（手机端 model 字段填它；留空自动从名称生成） / ID (the model name clients call)'),
+          h('input', {
+            value: draftId,
+            readOnly: !!editing,
+            onChange: (e) => setDraftId(e.target.value),
+            placeholder: '例如：default / fast / coding',
+            style: { ...styles.input, ...(editing ? { opacity: 0.6 } : {}) },
+          }),
+          h('div', { style: { ...styles.label, marginTop: 10 } }, '名称 / Name'),
           h('input', {
             value: draftName,
             onChange: (e) => setDraftName(e.target.value),
@@ -520,12 +616,14 @@ window.__ModuleLoader__.load({
             h('div', { style: { fontWeight: 600 } }, '对外展示的模型 / Visible models'),
             h('div', { style: styles.row },
               h('button', { type: 'button', style: styles.btn, onClick: showAllModels }, '全部显示'),
-              h('button', {
-                type: 'button',
-                style: styles.btnPrimary,
-                onClick: saveForwarding,
-                disabled: saving,
-              }, saving ? '保存中…' : '保存设置 / Save'),
+              masked
+                ? null
+                : h('button', {
+                    type: 'button',
+                    style: styles.btnPrimary,
+                    onClick: saveForwarding,
+                    disabled: saving,
+                  }, saving ? '保存中…' : '保存设置 / Save'),
             ),
           ),
           h('div', { style: { ...styles.muted, marginTop: 4, marginBottom: 8 } },

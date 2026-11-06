@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-router-gateway",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "DeepSeek Harness plugin: group every model DSH can reach into ordered fallback chains and expose them through an OpenAI-compatible gateway (BaseURL + key) for phones and other external clients.",
   "keywords": [
     "deepseek",

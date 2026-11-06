@@ -77,6 +77,7 @@ export const Config =
         gatewayKey: schemaMod.string().default('').volatile(),
         defaultTimeoutMs: schemaMod.number().default(60000).volatile(),
         maxRetryPerModel: schemaMod.number().default(1).volatile(),
+        failureCooldownMs: schemaMod.number().default(60000).volatile(),
         publicPort: schemaMod.number().default(0).volatile(),
         modelVisibility: schemaMod.dict(schemaMod.array(schemaMod.string())).default({}).volatile(),
         routes: schemaMod
@@ -280,11 +281,21 @@ async function callSingleModel(ctx, provider, model, opts, signal) {
   return text;
 }
 
-async function callRoute(ctx, route, opts, signal, timeoutMs, maxRetry) {
+async function callRoute(ctx, route, opts, signal, state) {
+  const { timeoutMs, maxRetry, failures } = state;
   const errors = [];
+  const skipped = [];
+  const now = Date.now();
   const models = Array.isArray(route.models) ? route.models : [];
   for (const ref of models) {
     if (!ref || !ref.provider || !ref.model) continue;
+    const key = `${ref.provider}/${ref.model}`;
+    const cooldownUntil = failures.get(key);
+    if (cooldownUntil && cooldownUntil > now) {
+      skipped.push(`${key} (cooling ${Math.ceil((cooldownUntil - now) / 1000)}s)`);
+      continue;
+    }
+    if (cooldownUntil) failures.delete(key);
     let lastError = null;
     for (let attempt = 0; attempt <= maxRetry; attempt++) {
       const controller = new AbortController();
@@ -293,7 +304,10 @@ async function callRoute(ctx, route, opts, signal, timeoutMs, maxRetry) {
       if (signal) signal.addEventListener('abort', onAbort, { once: true });
       try {
         const text = await callSingleModel(ctx, ref.provider, ref.model, opts, controller.signal);
-        if (text.trim() !== '') return { text, model: ref };
+        if (text.trim() !== '') {
+          failures.delete(key); // success clears any history
+          return { text, model: ref };
+        }
         lastError = new Error('empty response');
       } catch (error) {
         lastError = error;
@@ -303,9 +317,17 @@ async function callRoute(ctx, route, opts, signal, timeoutMs, maxRetry) {
         signal?.removeEventListener('abort', onAbort);
       }
     }
-    errors.push(`${ref.provider}/${ref.model}: ${lastError?.message ?? 'failed'}`);
+    // Failed end-to-end: park this model so the next request skips it.
+    failures.set(key, now + state.failureCooldownMs);
+    errors.push(`${key}: ${lastError?.message ?? 'failed'}`);
   }
-  throw new Error(`all models in route failed: ${errors.join(' | ') || 'route has no models'}`);
+  if (models.length === 0) throw new Error('route has no models');
+  const parts = [...errors];
+  if (skipped.length) parts.push(`skipped: ${skipped.join(', ')}`);
+  if (errors.length === 0 && skipped.length > 0) {
+    throw new Error(`every model is cooling: ${skipped.join(', ')} — retry later`);
+  }
+  throw new Error(`all models in route failed: ${parts.join(' | ')}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +362,11 @@ function writeStateFile(state) {
       gatewayKey: state.gatewayKey,
       modelVisibility: state.modelVisibility ?? {},
       routes: [...state.routes.values()],
+      settings: {
+        defaultTimeoutMs: state.timeoutMs,
+        maxRetryPerModel: state.maxRetry,
+        publicPort: state.publicPort,
+      },
     };
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
@@ -358,13 +385,101 @@ function persistSettings(ctx, state) {
 }
 
 // ---------------------------------------------------------------------------
+// trust fence: the host webServer dispatches our prefix before its own auth
+// (longest-prefix wins), so on a public deployment these routes must gate
+// themselves. We reuse the composition's `connection` admission service when
+// mounted; on the LAN listener every request is already by-passing DSH auth,
+// so that socket path skips the fence and relies on the gateway key alone.
+// ---------------------------------------------------------------------------
+
+function makeTrustedRequestCheck(ctx) {
+  return async function isTrusted(req) {
+    let connection;
+    try {
+      connection = typeof ctx.get === 'function' ? ctx.get('connection') : undefined;
+    } catch {
+      connection = undefined;
+    }
+    if (!connection) {
+      try {
+        connection = ctx.connection;
+      } catch {
+        connection = undefined;
+      }
+    }
+    try {
+      // The kernel admission decision, both historical shapes: `admit`
+      // returns { rejection? }, the older requestRejection returns a status.
+      if (connection && typeof connection.admit === 'function') {
+        const decision = await connection.admit(req);
+        return !(decision && decision.rejection !== undefined);
+      }
+      if (connection && typeof connection.requestRejection === 'function') {
+        return connection.requestRejection(req) === undefined;
+      }
+    } catch {
+      // Never bypass browser authentication when the mounted service fails.
+      return false;
+    }
+    // No admission service in this composition: fall back to a structural
+    // loopback + same-origin fence, mirroring the kernel's own replica.
+    return structuralTrust(req);
+  };
+}
+
+const LOOPBACK_NAMES = new Set(['127.0.0.1', '[::1]', '::1', 'localhost']);
+
+function structuralTrust(req) {
+  const host = authorityOf(req.headers?.host, 'http');
+  if (host === null || !LOOPBACK_NAMES.has(host.hostname)) return false;
+  const site = String(req.headers?.['sec-fetch-site'] ?? '').toLowerCase();
+  if (site === 'cross-site') return false;
+  for (const header of ['origin', 'referer']) {
+    const raw = req.headers?.[header];
+    if (typeof raw !== 'string' || raw.trim() === '') continue;
+    const authority = authorityOf(raw.trim());
+    if (authority === null) return false;
+    if (
+      authority.scheme !== host.scheme ||
+      authority.hostname !== host.hostname ||
+      authority.port !== host.port
+    )
+      return false;
+  }
+  return true;
+}
+
+function authorityOf(value, defaultScheme) {
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  let url;
+  try {
+    url = new URL(value.includes('://') ? value.trim() : `${defaultScheme ?? 'http'}://${value.trim()}`);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  const port = url.port === '' ? (url.protocol === 'https:' ? '443' : '80') : url.port;
+  return { scheme: url.protocol.replace(':', ''), hostname: url.hostname.toLowerCase(), port };
+}
+
+function maskKey(key) {
+  const s = String(key ?? '');
+  if (s.length <= 8) return '••••';
+  return `${s.slice(0, 4)}…${s.slice(-4)}`;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP handler
 // ---------------------------------------------------------------------------
 
 function makeHandler(ctx, state) {
-  const { routes, timeoutMs, maxRetry, publicPort } = state;
+  const { routes, publicPort } = state;
+  const isTrustedRequest = makeTrustedRequestCheck(ctx);
 
-  async function handle(req, res) {
+  async function handle(req, res, opts = {}) {
+    // opts.trusted: set by the LAN listener, which has no DSH auth layer at
+    // all — those requests rely purely on the gateway key and may read the
+    // local-only surfaces only when the operator asked for a LAN exposure.
     let url;
     try {
       url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -386,9 +501,25 @@ function makeHandler(ctx, state) {
       return;
     }
 
-    // ----- unauthenticated: config for the management card -----
+    // ----- config for the management card -----
     if (pathname === PRIMARY + '/config' && req.method === 'GET') {
+      // The full config (key + route ids) is a local/trusted surface. On a
+      // public deployment an anonymous caller only gets the masked view; the
+      // admin UI itself runs from the already-authenticated DSH page, so it
+      // clears the host admission check like every other /api route does.
+      const trusted = opts.lanOnly || (await isTrustedRequest(req));
       const providers = await listProviderCatalog(ctx);
+      if (!trusted) {
+        json(res, 200, {
+          ok: true,
+          masked: true,
+          gatewayKey: maskKey(state.gatewayKey),
+          basePath: PRIMARY,
+          providers: providers.map((p) => ({ id: p.id, name: p.name, models: [] })),
+          routes: [...routes.values()].map((r) => ({ id: r.id, name: r.name, enabled: r.enabled, models: [] })),
+        });
+        return;
+      }
       json(res, 200, {
         ok: true,
         gatewayKey: state.gatewayKey,
@@ -396,6 +527,11 @@ function makeHandler(ctx, state) {
         publicPort,
         lanIps: lanAddresses(),
         modelVisibility: state.modelVisibility ?? {},
+        settings: {
+          defaultTimeoutMs: state.timeoutMs,
+          maxRetryPerModel: state.maxRetry,
+          failureCooldownMs: state.failureCooldownMs,
+        },
         routes: [...routes.values()],
         providers,
       });
@@ -410,7 +546,19 @@ function makeHandler(ctx, state) {
       return;
     }
 
-    // ----- admin settings (gateway key / model visibility) -----
+    // Admin mutations ride the same trust fence: a valid gateway key alone is
+    // not enough from off-box; it must come from a local/LAN/trusted surface.
+    const isAdmin =
+      pathname.startsWith(PRIMARY + '/admin/');
+    if (isAdmin && !opts.lanOnly) {
+      const trusted = await isTrustedRequest(req);
+      if (!trusted) {
+        openAiError(res, 403, 'admin actions require a local or authenticated session', 'auth_error');
+        return;
+      }
+    }
+
+    // ----- admin settings (gateway key / model visibility / runtime knobs) -----
     if (pathname === PRIMARY + '/admin/settings' && req.method === 'POST') {
       let body;
       try {
@@ -431,6 +579,18 @@ function makeHandler(ctx, state) {
         }
         state.modelVisibility = next;
       }
+      const s = body.settings;
+      if (s && typeof s === 'object') {
+        if (typeof s.defaultTimeoutMs === 'number' && s.defaultTimeoutMs >= 1000) {
+          state.timeoutMs = Math.floor(s.defaultTimeoutMs);
+        }
+        if (typeof s.maxRetryPerModel === 'number' && s.maxRetryPerModel >= 0) {
+          state.maxRetry = Math.floor(s.maxRetryPerModel);
+        }
+        if (typeof s.failureCooldownMs === 'number' && s.failureCooldownMs >= 0) {
+          state.failureCooldownMs = Math.floor(s.failureCooldownMs);
+        }
+      }
       const persist = persistSettings(ctx, state);
       json(res, 200, {
         ok: true,
@@ -438,6 +598,11 @@ function makeHandler(ctx, state) {
         ...(persist.reason ? { persistReason: persist.reason } : {}),
         gatewayKey: state.gatewayKey,
         modelVisibility: state.modelVisibility,
+        settings: {
+          defaultTimeoutMs: state.timeoutMs,
+          maxRetryPerModel: state.maxRetry,
+          failureCooldownMs: state.failureCooldownMs,
+        },
       });
       return;
     }
@@ -524,8 +689,9 @@ function makeHandler(ctx, state) {
         let result;
         let usedModel = model;
         if (route) {
-          result = await callRoute(ctx, route, opts, controller.signal, timeoutMs, maxRetry);
-          usedModel = `route:${route.id}`;
+          result = await callRoute(ctx, route, opts, controller.signal, state);
+          const hit = result.model || {};
+          usedModel = `${hit.provider || 'unknown'}/${hit.model || '?'}`;
         } else {
           const idx = model.indexOf(':');
           const provider = idx > 0 ? model.slice(0, idx) : '';
@@ -689,6 +855,10 @@ async function handleAdmin(req, res, pathname, state, ctx) {
         return;
       }
       const routeId = String(body.id ?? '').trim() || crypto.randomBytes(6).toString('hex');
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(routeId)) {
+        json(res, 400, { ok: false, error: 'route id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}' });
+        return;
+      }
       if (routes.has(routeId)) {
         json(res, 409, { ok: false, error: 'route id already exists' });
         return;
@@ -778,6 +948,10 @@ export function apply(ctx, config) {
       ? Math.floor(cfg.maxRetryPerModel)
       : 1;
   const publicPort = typeof cfg.publicPort === 'number' ? cfg.publicPort : 0;
+  const failureCooldownMs =
+    typeof cfg.failureCooldownMs === 'number' && cfg.failureCooldownMs >= 0
+      ? Math.floor(cfg.failureCooldownMs)
+      : 60000;
 
   const routes = new Map();
   for (const r of Array.isArray(cfg.routes) ? cfg.routes : []) {
@@ -806,8 +980,10 @@ export function apply(ctx, config) {
       (typeof cfg.gatewayKey === 'string' && cfg.gatewayKey.trim()) || '',
     timeoutMs,
     maxRetry,
+    failureCooldownMs,
     publicPort,
     modelVisibility,
+    failures: new Map(),
     ctx,
   };
 
@@ -835,6 +1011,18 @@ export function apply(ctx, config) {
           models: normalizeModels(r.models),
           enabled: r.enabled !== false,
         });
+      }
+    }
+    const s = saved.settings;
+    if (s && typeof s === 'object') {
+      if (typeof s.defaultTimeoutMs === 'number' && s.defaultTimeoutMs >= 1000) {
+        state.timeoutMs = Math.floor(s.defaultTimeoutMs);
+      }
+      if (typeof s.maxRetryPerModel === 'number' && s.maxRetryPerModel >= 0) {
+        state.maxRetry = Math.floor(s.maxRetryPerModel);
+      }
+      if (typeof s.failureCooldownMs === 'number' && s.failureCooldownMs >= 0) {
+        state.failureCooldownMs = Math.floor(s.failureCooldownMs);
       }
     }
   }
@@ -893,7 +1081,9 @@ export function apply(ctx, config) {
           res.end();
           return;
         }
-        Promise.resolve(handler(req, res)).catch((error) => {
+        // This socket bypasses DSH's own auth entirely, so requests here are
+        // LAN by construction; the gateway key is the only gate.
+        Promise.resolve(handler(req, res, { lanOnly: true })).catch((error) => {
           try {
             json(res, 500, { error: { message: String(error?.message ?? error) } });
           } catch {

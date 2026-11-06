@@ -3,13 +3,34 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.0.2 — 2026-11-06
+
+### Security
+
+- Public deployments no longer leak the gateway key: `/config` answers with a
+  masked view (key shown as `sk-a…z9`, model lists trimmed) unless the caller
+  passes the host's own connection admission check (loopback / authenticated
+  DSH session). Admin mutations (route CRUD, settings) now additionally
+  require that trust fence — a bare gateway key from off-box cannot manage.
+- Route ids are validated (`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`) to keep client
+  addressing safe.
+
+### Added
+
+- Failure cooldown: a model that exhausts its attempts is skipped directly
+  for `failureCooldownMs` (default 60s) instead of burning a fresh timeout on
+  every request; success clears the mark. Configurable in the card and patch.
+- Advanced settings in the management card: per-model timeout, retries, and
+  failure cooldown — all persisted through the state file.
+- Route id is user-settable at creation (auto-slug from the name when left
+  blank) and fixed afterwards, mirroring its role as the external model name.
 
 ### Changed
 
-- Documentation only: `README.md` is now a single bilingual document (English
-  + full 中文 section) so npmjs.com — which renders one README — also shows
-  the Chinese docs. `README.zh.md` remains for the GitHub language link.
+- `chat.completions` now echoes the actually answering model in `model`
+  (e.g. `our-free-model/kilo-auto/free`) instead of `route:<id>`.
+- `README.md` is one bilingual document (English + full 中文 section) so
+  npmjs.com — which renders a single README — also shows the Chinese docs.
 
 ## 1.0.0 — 2026-11-04
 
