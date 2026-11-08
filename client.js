@@ -90,7 +90,121 @@ window.__ModuleLoader__.load({
         overflowY: 'auto',
       },
       check: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, minWidth: 160 },
+      chipBig: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 2,
+        borderRadius: 12,
+        padding: '4px 10px',
+        fontSize: 14,
+        marginRight: 8,
+        marginBottom: 6,
+        background: 'rgba(79,70,229,0.12)',
+        color: '#4f46e5',
+      },
+      orderBtn: {
+        border: '1px solid var(--dsw-alias-border, #d1d5db)',
+        borderRadius: 6,
+        padding: '3px 9px',
+        background: 'transparent',
+        color: 'inherit',
+        cursor: 'pointer',
+        fontSize: 14,
+        lineHeight: '16px',
+      },
+      dragHandle: {
+        cursor: 'grab',
+        opacity: 0.55,
+        fontSize: 15,
+        padding: '0 4px',
+        userSelect: 'none',
+      },
+      editingCard: {
+        border: '2px solid #4f46e5',
+        borderRadius: 8,
+        padding: 12,
+        marginBottom: 10,
+        background: 'rgba(79,70,229,0.06)',
+      },
+      docsPre: {
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        fontSize: 13,
+        lineHeight: 1.55,
+        margin: 0,
+        fontFamily: 'inherit',
+        maxHeight: 420,
+        overflowY: 'auto',
+      },
     };
+
+    // ---------------------------------------------------- display-name maps
+
+    /** provider id -> display name, from /config providers. */
+    function buildProviderNames(providers) {
+      const map = {};
+      for (const p of providers || []) {
+        if (p && p.id && p.name) map[p.id] = p.name;
+      }
+      return map;
+    }
+
+    /** provider id -> { model id -> display name }. */
+    function buildModelNames(providers) {
+      const map = {};
+      for (const p of providers || []) {
+        if (!p || !p.id || !Array.isArray(p.models)) continue;
+        const inner = {};
+        for (const m of p.models) {
+          if (m && m.id && m.name && m.name !== m.id) inner[m.id] = m.name;
+        }
+        map[p.id] = inner;
+      }
+      return map;
+    }
+
+    /** "provider/model" -> human label, falling back to the raw ids. */
+    function modelLabel(providerNames, modelNames, provider, model) {
+      const pid = providerNames[provider] || provider;
+      const mid = (modelNames[provider] && modelNames[provider][model]) || model;
+      return `${pid} · ${mid}`;
+    }
+
+    // ------------------------------------------------ minimal markdown text
+
+    /**
+     * Very small markdown subset, returned as plain strings composed with the
+     * `h()` callsite: headings/bold/inline code are flattened, fenced blocks
+     * keep their text with a marker, tables degrade to row-per-line text.
+     * No HTML is ever produced from the markdown itself (data, not code).
+     */
+    function markdownToText(md) {
+      const out = [];
+      let inFence = false;
+      for (const raw of String(md || '').split(/\r?\n/)) {
+        const line = raw;
+        if (/^```/.test(line.trim())) {
+          inFence = !inFence;
+          out.push(inFence ? '┌ ' : '└─');
+          continue;
+        }
+        if (inFence) {
+          out.push('   ' + line);
+          continue;
+        }
+        let t = line;
+        t = t.replace(/^#{1,6}\s*/, '');
+        t = t.replace(/^\s*[*+-]\s/, '• ');
+        t = t.replace(/\*\*([^*]+)\*\*/g, '$1');
+        t = t.replace(/`([^`]+)`/g, '$1');
+        t = t.replace(/^>\s?/, '');
+        const link = t.match(/\[([^\]]+)\]\((https?:[^)]+)\)/);
+        if (link) t = t.replace(link[0], `${link[1]} (${link[2]})`);
+        if (/^\s*\|?\s*:?-{2,}/.test(t)) continue;
+        out.push(t);
+      }
+      return out.join('\n');
+    }
 
     // ---------------------------------------------------------------- helpers
 
@@ -115,6 +229,9 @@ window.__ModuleLoader__.load({
 
     function ModelRouterGatewayCard(props) {
       const view = props && props.view;
+      const React_ = React;
+      const useRef = React_.useRef;
+      const useMemo = React_.useMemo;
       const [loading, setLoading] = useState(true);
       const [error, setError] = useState('');
       const [config, setConfig] = useState(null);
@@ -138,6 +255,16 @@ window.__ModuleLoader__.load({
       const [cooldowns, setCooldowns] = useState([]);
       const [checking, setChecking] = useState(false);
       const [copied, setCopied] = useState('');
+      const [dragOver, setDragOver] = useState(-1);
+      const [docsOpen, setDocsOpen] = useState(false);
+      const [docsText, setDocsText] = useState('');
+      const [docsLoading, setDocsLoading] = useState(false);
+      const [formOpen, setFormOpen] = useState(false);
+      const editFormRef = useRef(null);
+      const moveTimer = useRef(null);
+
+      const providerNames = useMemo(() => buildProviderNames(providers), [providers]);
+      const modelNames = useMemo(() => buildModelNames(providers), [providers]);
 
       const load = useCallback(async () => {
         setLoading(true);
@@ -198,10 +325,12 @@ window.__ModuleLoader__.load({
         setDraftId('');
         setDraftName('');
         setDraftModels([{ provider: '', model: '' }]);
+        setFormOpen(false);
       }
 
       function startEdit(route) {
         setEditing(route);
+        setFormOpen(true);
         setDraftId(route.id || '');
         setDraftName(route.name || '');
         const models = Array.isArray(route.models) && route.models.length
@@ -209,6 +338,17 @@ window.__ModuleLoader__.load({
           : [{ provider: '', model: '' }];
         setDraftModels(models);
         setOpen(true);
+        // The edit form lives at the bottom of a long card; bring it into
+        // view, otherwise the click looks like it did nothing.
+        setTimeout(() => {
+          try {
+            if (editFormRef.current && editFormRef.current.scrollIntoView) {
+              editFormRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          } catch {
+            /* scroll is a convenience only */
+          }
+        }, 60);
       }
 
       function suggestId(name) {
@@ -295,27 +435,45 @@ window.__ModuleLoader__.load({
 
       // ---------------- chain ordering ----------------
 
-      async function moveRouteModel(route, index, dir) {
+      /**
+       * Reorder a saved chain: swap locally first (instant visual feedback),
+       * then PUT the final order debounced. Rapid clicks coalesce into one
+       * request; failure falls back to a full reload so the UI never lies.
+       */
+      function moveRouteModel(route, index, dir) {
         const models = (route.models || []).slice();
         const j = index + dir;
         if (j < 0 || j >= models.length) return;
         const t = models[index];
         models[index] = models[j];
         models[j] = t;
-        try {
-          await fetchJson(BASE + '/admin/routes/' + encodeURIComponent(route.id), {
-            method: 'PUT',
-            headers: {
-              'content-type': 'application/json',
-              authorization: `Bearer ${savedKey}`,
-            },
-            body: JSON.stringify({ models }),
-          });
-          await load();
-        } catch (e) {
-          setError(e && e.message ? e.message : String(e));
-        }
+        const moved = { ...route, models };
+        setRoutes((prev) => prev.map((r) => (r.id === route.id ? moved : r)));
+        if (editing && editing.id === route.id) setDraftModels(models.map((m) => ({ ...m })));
+        if (moveTimer.current) clearTimeout(moveTimer.current);
+        moveTimer.current = setTimeout(async () => {
+          moveTimer.current = null;
+          try {
+            await fetchJson(BASE + '/admin/routes/' + encodeURIComponent(route.id), {
+              method: 'PUT',
+              headers: {
+                'content-type': 'application/json',
+                authorization: `Bearer ${savedKey}`,
+              },
+              body: JSON.stringify({ models }),
+            });
+            await load();
+          } catch (e) {
+            setError(e && e.message ? e.message : String(e));
+            await load();
+          }
+        }, 350);
       }
+
+      // cleanup the debounce timer on unmount
+      useEffect(() => () => {
+        if (moveTimer.current) clearTimeout(moveTimer.current);
+      }, []);
 
       function moveDraft(index, dir) {
         const next = draftModels.slice();
@@ -325,6 +483,74 @@ window.__ModuleLoader__.load({
         next[index] = next[j];
         next[j] = t;
         setDraftModels(next);
+      }
+
+      // HTML5 drag & drop for the draft chain (local-only until saved).
+      // A ref survives re-renders mid-drag; a plain variable would reset.
+      const dragFrom = useRef(-1);
+
+      function draftDragStart(e, index) {
+        dragFrom.current = index;
+        try {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', String(index));
+        } catch {
+          /* some webviews restrict dataTransfer; dragFrom still works */
+        }
+      }
+
+      function draftDragOver(e, index) {
+        if (dragFrom.current < 0 || index === dragFrom.current) return;
+        e.preventDefault();
+        try {
+          e.dataTransfer.dropEffect = 'move';
+        } catch {
+          /* optional */
+        }
+        // Skip the state write when unchanged: a re-render mid-drag must
+        // never shift layout under the cursor, or the drop is cancelled.
+        if (dragOver !== index) setDragOver(index);
+      }
+
+      function draftDrop(e, index) {
+        e.preventDefault();
+        setDragOver(-1);
+        const from = dragFrom.current;
+        dragFrom.current = -1;
+        if (from < 0 || from === index) return;
+        const next = draftModels.slice();
+        const [item] = next.splice(from, 1);
+        // Removing the dragged row already shifted every row below it up
+        // one slot, so the drop target's current index IS the landing slot
+        // in both directions (the classic +/-1 trap).
+        next.splice(index, 0, item);
+        setDraftModels(next);
+      }
+
+      function draftDragEnd() {
+        dragFrom.current = -1;
+        setDragOver(-1);
+      }
+
+      // ---------------- docs (bundled guide) ----------------
+
+      async function toggleDocs() {
+        const next = !docsOpen;
+        setDocsOpen(next);
+        if (next && !docsText && !docsLoading) {
+          setDocsLoading(true);
+          try {
+            // /docs is static bundled content (no config inside), served
+            // outside the auth fence: works on masked and unmasked views.
+            const data = await fetchJson(BASE + '/docs');
+            setDocsText(markdownToText(data.markdown));
+          } catch (e) {
+            setError(e && e.message ? e.message : String(e));
+            setDocsOpen(false);
+          } finally {
+            setDocsLoading(false);
+          }
+        }
       }
 
       // ---------------- self update ----------------
@@ -515,12 +741,28 @@ window.__ModuleLoader__.load({
       }
 
       return h(
-        'div',
-        { style: styles.page },
+        'div', { style: styles.page },
         header,
         error
           ? h('div', { style: { color: '#dc2626', fontSize: 13, margin: '6px 0' } }, error)
           : null,
+
+        // -------- intro: one sentence, then the full guide right below it --------
+        h('div', { style: { ...styles.card, marginTop: 6 } },
+          h('div', { style: { fontSize: 13, lineHeight: 1.5 } },
+            '把 DSH 能调用的所有模型组成顺序降级链，用一个 OpenAI 兼容网关（BaseURL + Key）暴露给手机和任何外部客户端——模型 A 没额度/限流/报错时无感切到 B，对话不中断。'),
+          h('div', {
+            style: { ...styles.providerHeader, borderBottom: 'none', cursor: 'pointer', marginTop: 6 },
+            onClick: toggleDocs,
+          },
+            h('div', { style: { fontWeight: 600 } }, '完整使用说明 / Full guide'),
+            h('span', { style: styles.muted }, docsOpen ? '收起' : '展开'),
+          ),
+          docsOpen
+            ? h('pre', { style: styles.docsPre },
+                docsLoading ? '加载中…' : (docsText || '（文档不可用）'))
+            : null,
+        ),
 
         // -------- gateway --------
         h('div', { style: styles.card },
@@ -629,32 +871,33 @@ window.__ModuleLoader__.load({
                   (route.models || []).map((m, i) => {
                     const key = `${m.provider}/${m.model}`;
                     const cooling = (cooldowns || []).find((c) => c.model === key);
+                    const last = i === (route.models || []).length - 1;
                     return h('span', {
                       key: i,
                       style: {
-                        ...styles.chip,
+                        ...styles.chipBig,
                         ...(cooling ? { background: 'rgba(220,38,38,0.12)', color: '#dc2626' } : {}),
                       },
                       title: cooling ? `冷却中 ${cooling.remainingSec}s` : key,
                     }, [
-                      `${i + 1}. ${m.provider}/${m.model}${cooling ? ` ⏳${cooling.remainingSec}s` : ''}`,
-                      masked
+                      `${i + 1}. ${modelLabel(providerNames, modelNames, m.provider, m.model)}${cooling ? ` ⏳${cooling.remainingSec}s` : ''}`,
+                      masked || i === 0
                         ? null
                         : h('button', {
                             type: 'button',
                             'aria-label': '上移',
-                            disabled: i === 0,
+                            title: '上移',
                             onClick: (e) => { e.stopPropagation(); moveRouteModel(route, i, -1); },
-                            style: { border: 'none', background: 'transparent', cursor: i === 0 ? 'default' : 'pointer', opacity: i === 0 ? 0.3 : 0.7, fontSize: 11, marginLeft: 2 },
+                            style: styles.orderBtn,
                           }, '↑'),
-                      masked
+                      masked || last
                         ? null
                         : h('button', {
                             type: 'button',
                             'aria-label': '下移',
-                            disabled: i === route.models.length - 1,
+                            title: '下移',
                             onClick: (e) => { e.stopPropagation(); moveRouteModel(route, i, 1); },
-                            style: { border: 'none', background: 'transparent', cursor: i === route.models.length - 1 ? 'default' : 'pointer', opacity: i === route.models.length - 1 ? 0.3 : 0.7, fontSize: 11 },
+                            style: styles.orderBtn,
                           }, '↓'),
                     ]);
                   }),
@@ -662,10 +905,29 @@ window.__ModuleLoader__.load({
               ),
             ),
 
-        // -------- new / edit route --------
-        h('div', { style: { ...styles.card, marginTop: 12, display: masked ? 'none' : 'block' } },
-          h('div', { style: { fontWeight: 600, marginBottom: 8 } },
-            editing ? `编辑路由组：${editing.name || editing.id}` : '新建路由组 / New route group'),
+        // -------- new / edit route (collapsed by default) --------
+        h('div', {
+          ref: editFormRef,
+          style: {
+            ...(editing ? styles.editingCard : styles.card),
+            marginTop: 12,
+            display: masked ? 'none' : 'block',
+          },
+        },
+          h('div', {
+            style: { ...styles.providerHeader, borderBottom: formOpen ? styles.providerHeader.borderBottom : 'none', cursor: 'pointer' },
+            onClick: () => setFormOpen((v) => !v),
+          },
+            h('div', { style: { fontWeight: 600, color: editing ? '#4f46e5' : undefined } },
+              editing ? `✎ 正在编辑路由组：${editing.name || editing.id}` : '新建路由组 / New route group'),
+            h('span', { style: styles.muted }, formOpen ? '收起' : '展开'),
+          ),
+          formOpen
+            ? h('div', null,
+          editing
+            ? h('div', { style: { ...styles.muted, marginTop: 4, marginBottom: 8 } },
+                '改动仅在此表单内，点“保存”才会生效；“取消编辑”回到收起状态。')
+            : null,
           h('div', { style: styles.label },
             editing ? 'ID（创建后不可修改，手机端以此寻址） / ID (fixed after create)' : 'ID（手机端 model 字段填它；留空自动从名称生成） / ID (the model name clients call)'),
           h('input', {
@@ -683,9 +945,24 @@ window.__ModuleLoader__.load({
             style: styles.input,
           }),
           h('div', { style: { ...styles.label, marginTop: 10 } },
-            '模型序列（按顺序尝试，失败自动切换下一个）/ Ordered fallback chain'),
+            '模型序列（按顺序尝试，失败自动切换下一个；拖 ⠿ 或点箭头调序）/ Ordered fallback chain (drag ⠿ or use arrows)'),
           draftModels.map((m, i) =>
-            h('div', { key: i, style: { ...styles.row, marginBottom: 6 } },
+            h('div', {
+              key: i,
+              draggable: true,
+              onDragStart: (e) => draftDragStart(e, i),
+              onDragOver: (e) => draftDragOver(e, i),
+              onDrop: (e) => draftDrop(e, i),
+              onDragEnd: draftDragEnd,
+              style: {
+                ...styles.row,
+                marginBottom: 6,
+                padding: dragOver === i ? '0 0 0 0' : undefined,
+                borderTop: dragOver === i && i < dragFrom.current ? '2px solid #4f46e5' : '2px solid transparent',
+                borderBottom: dragOver === i && dragFrom.current >= 0 && i > dragFrom.current ? '2px solid #4f46e5' : undefined,
+              },
+            },
+              h('span', { style: styles.dragHandle, title: '拖动排序' }, '⠿'),
               h('select', {
                 value: m.provider,
                 onChange: (e) => {
@@ -718,20 +995,24 @@ window.__ModuleLoader__.load({
                   ? h('option', { value: m.model }, m.model)
                   : null,
               ),
-              h('button', {
-                type: 'button',
-                style: styles.btn,
-                'aria-label': '上移',
-                disabled: i === 0,
-                onClick: () => moveDraft(i, -1),
-              }, '↑'),
-              h('button', {
-                type: 'button',
-                style: styles.btn,
-                'aria-label': '下移',
-                disabled: i === draftModels.length - 1,
-                onClick: () => moveDraft(i, 1),
-              }, '↓'),
+              i === 0
+                ? null
+                : h('button', {
+                    type: 'button',
+                    style: styles.btn,
+                    'aria-label': '上移',
+                    title: '上移',
+                    onClick: () => moveDraft(i, -1),
+                  }, '↑'),
+              i === draftModels.length - 1
+                ? null
+                : h('button', {
+                    type: 'button',
+                    style: styles.btn,
+                    'aria-label': '下移',
+                    title: '下移',
+                    onClick: () => moveDraft(i, 1),
+                  }, '↓'),
               h('button', {
                 type: 'button',
                 style: styles.btn,
@@ -753,6 +1034,8 @@ window.__ModuleLoader__.load({
               ? h('button', { type: 'button', style: styles.btn, onClick: resetDraft }, '取消编辑')
               : null,
           ),
+            )
+            : null,
         ),
 
         // -------- model visibility --------
@@ -854,6 +1137,8 @@ window.__ModuleLoader__.load({
                       : update.message || '')
                 : null,
             ),
+
+        // -------- bottom call hint (docs moved to top) --------
 
         h('div', { style: { ...styles.muted, marginTop: 10 } },
           `调用 / Call: POST ${phoneBase}/chat/completions，model 填路由组 ID 或 provider:model。`),

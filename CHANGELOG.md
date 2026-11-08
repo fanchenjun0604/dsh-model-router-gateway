@@ -3,6 +3,54 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.0.4 — 2026-11-08
+
+### Fixed
+
+- **Edit button gave no visible feedback**: the edit form lives at the bottom
+  of a long card and looked identical to the create form. Clicking 编辑 now
+  scrolls the form into view and it switches to a highlighted "✎ 正在编辑"
+  state (accent border + title), clearly distinct from 新建路由组.
+- **Edge arrows were ambiguous**: first/last chain entries kept a faded
+  disabled ↑/↓ that suggested a broken button. They are now simply not
+  rendered at the ends.
+
+### Changed
+
+- **Chain chips are readable**: bigger font, bigger hit targets, and each
+  entry shows the provider/model display names (e.g. `Our Free Model ·
+  Kilo Auto Free`) with the raw `provider/model` id preserved in the tooltip
+  and still used by every API call.
+- **Saved-chain reorder feels instant**: ↑/↓ swaps locally first and the PUT
+  is debounced (rapid clicks coalesce into one save); a failed save reloads
+  truthfully instead of leaving a lying order.
+- **README slimmed for npm**: the package description is a short intro again
+  (it used to inline the entire bilingual manual). The full guide now ships
+  inside the package (`docs/usage.md`) and renders offline in the card's new
+  使用说明 panel — no GitHub dependency, nothing blocked.
+- Added `homepage`/`repository`/`bugs` fields pointing at the npm page.
+
+### Added
+
+- **Drag to reorder in the create/edit form**: grab the ⠿ handle and drop;
+  arrow buttons stay as the keyboard-accessible fallback. Reordering the
+  draft is local until 保存.
+- Bundled in-card guide panel (served from the package, `/docs` — static
+  content outside the auth fence, so the masked public view can read it too).
+
+### Fixed (pre-release rounds)
+
+- Drag-down in the draft chain was a no-op: the drop index double-counted
+  the slot shift caused by removing the dragged row.
+- The guide panel flashed closed: it fetched with the auth fence in mind;
+  the endpoint moved to the fence-free `/docs` and the fetch matches.
+- Card layout: one-sentence intro with the expandable full guide directly
+  under it (was: nothing up top, guide buried at the bottom); the
+  create/edit route form is collapsed by default like any other section —
+  编辑 opens and scrolls to it, 保存/取消 collapses again.
+- npm README reduced to the single-sentence intro + feature bullets.
+
+
 ## 1.0.3 — 2026-11-06
 
 ### Added

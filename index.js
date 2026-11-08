@@ -794,6 +794,19 @@ function makeHandler(ctx, state) {
       return;
     }
 
+    // ----- bundled guide: static package content with no configuration or
+    // secrets inside, so it stays outside the auth fence by design (the
+    // masked public view can render it too) -----
+    if (pathname === PRIMARY + '/docs' && req.method === 'GET') {
+      try {
+        const text = fs.readFileSync(new URL('./docs/usage.md', import.meta.url), 'utf8');
+        json(res, 200, { ok: true, markdown: text });
+      } catch (error) {
+        json(res, 404, { ok: false, error: `docs unavailable: ${error?.message ?? error}` });
+      }
+      return;
+    }
+
     // ----- auth -----
     const auth = req.headers?.authorization ?? '';
     const token = String(auth).replace(/^Bearer\s+/i, '').trim();

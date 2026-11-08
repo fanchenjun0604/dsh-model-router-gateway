@@ -1,7 +1,15 @@
 {
   "name": "dsh-model-router-gateway",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "DeepSeek Harness plugin: group every model DSH can reach into ordered fallback chains and expose them through an OpenAI-compatible gateway (BaseURL + key) for phones and other external clients.",
+  "homepage": "https://www.npmjs.com/package/dsh-model-router-gateway",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fanchenjun0604/dsh-model-router-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fanchenjun0604/dsh-model-router-gateway/issues"
+  },
   "keywords": [
     "deepseek",
     "deepseek-harness",
@@ -32,6 +40,7 @@
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
+    "docs/*.md",
     "icon.svg",
     "README.md",
     "LICENSE",
