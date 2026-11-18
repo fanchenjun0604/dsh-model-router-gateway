@@ -861,11 +861,12 @@ function makeHandler(ctx, state) {
         }
       }
       const persist = persistSettings(ctx, state);
+      // Never echo the full gateway key back (1.0.5 hardening): the caller
+      // just submitted it, and /config remains the only read surface.
       json(res, 200, {
         ok: true,
         persisted: persist.ok,
         ...(persist.reason ? { persistReason: persist.reason } : {}),
-        gatewayKey: state.gatewayKey,
         modelVisibility: state.modelVisibility,
         settings: {
           defaultTimeoutMs: state.timeoutMs,
@@ -1143,7 +1144,13 @@ async function handleAdmin(req, res, pathname, state, ctx) {
         json(res, 400, { ok: false, error: 'invalid JSON' });
         return;
       }
-      const routeId = String(body.id ?? '').trim() || crypto.randomBytes(6).toString('hex');
+      // Route id is required since 1.0.5: silent random ids made the client
+      // form look broken (addressing a route is the user's job, not ours).
+      const routeId = String(body.id ?? '').trim();
+      if (!routeId) {
+        json(res, 400, { ok: false, error: 'route id is required' });
+        return;
+      }
       if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(routeId)) {
         json(res, 400, { ok: false, error: 'route id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}' });
         return;

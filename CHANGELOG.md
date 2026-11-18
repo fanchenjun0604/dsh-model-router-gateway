@@ -3,6 +3,39 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.0.5 — 2026-11-18
+
+### Fixed
+
+- **Route ID could silently fail**: leaving the ID empty while creating made
+  保存 do nothing visible (the auto-generated-from-name fallback produced an
+  empty string for Chinese names, and the error was rendered at the page top,
+  off-screen). The ID is now required at creation, and **every save failure
+  reports inside the form** with the offending field named (ID / 名称 / 模型).
+- **Create and edit are no longer mutually exclusive**: clicking 编辑 used to
+  replace the 新建 entry entirely (it only reappeared after save/cancel). The
+  form now always shows a 新建 entry next to the "编辑中" state; switching
+  modes keeps the form open.
+
+### Added
+
+- **Visibility filter box**: type to match across every provider's models;
+  purely a display filter — checked state is untouched and shared across
+  filtering, and 全选/反选/清空 act on the filtered subset only (bulk
+  maintenance like "kill all minimax variants" in one click).
+- **Per-block saves**: the gateway block (key + advanced settings) and the
+  visibility block each carry their own save button that submits only their
+  own fields, with an inline 已保存/失败 status. Finding one global 保存
+  button below unrelated sections is over.
+- The gateway block can now collapse like the other sections (default open).
+
+### Security
+
+- `POST /admin/settings` no longer echoes the full gateway key back in its
+  response (the caller submitted it; `/config` stays the only read surface).
+- Creating a route without an ID is rejected server-side (400) instead of
+  assigning a random hex one clients could never address.
+
 ## 1.0.4 — 2026-11-08
 
 ### Fixed

@@ -260,6 +260,13 @@ window.__ModuleLoader__.load({
       const [docsText, setDocsText] = useState('');
       const [docsLoading, setDocsLoading] = useState(false);
       const [formOpen, setFormOpen] = useState(false);
+      // 1.0.5: gateway block collapse, visibility filter box, and per-block
+      // inline status messages (top-level error kept for load failures).
+      const [gatewayOpen, setGatewayOpen] = useState(true);
+      const [modelFilter, setModelFilter] = useState('');
+      const [formError, setFormError] = useState('');
+      const [gatewayMsg, setGatewayMsg] = useState('');
+      const [visMsg, setVisMsg] = useState('');
       const editFormRef = useRef(null);
       const moveTimer = useRef(null);
 
@@ -325,7 +332,19 @@ window.__ModuleLoader__.load({
         setDraftId('');
         setDraftName('');
         setDraftModels([{ provider: '', model: '' }]);
-        setFormOpen(false);
+        setFormError('');
+      }
+
+      // 1.0.5: create and edit never hide each other. Both entries are always
+      // available; switching mode keeps the form open so the user can see what
+      // changed instead of wondering why "nothing happened".
+      function startCreate() {
+        setEditing(null);
+        setDraftId('');
+        setDraftName('');
+        setDraftModels([{ provider: '', model: '' }]);
+        setFormError('');
+        setFormOpen(true);
       }
 
       function startEdit(route) {
@@ -351,16 +370,12 @@ window.__ModuleLoader__.load({
         }, 60);
       }
 
-      function suggestId(name) {
-        return String(name || '')
-          .toLowerCase()
-          .replace(/[^a-z0-9_-]+/g, '-')
-          .replace(/^-+|-+$/g, '')
-          .slice(0, 40);
-      }
-
+      // 1.0.5: every save failure surfaces INSIDE the form (formError), not in
+      // the page-top error line that scrolling hides. Field messages name the
+      // offending field so a silent no-op becomes an actionable hint.
       async function saveRoute() {
         setError('');
+        setFormError('');
         const models = draftModels
           .map((m) => ({
             provider: String(m.provider || '').trim(),
@@ -368,37 +383,54 @@ window.__ModuleLoader__.load({
           }))
           .filter((m) => m.provider && m.model);
         if (!models.length) {
-          setError('至少配置一个模型 / add at least one model');
+          setFormError('请填写至少一个完整的模型（提供商 + 模型）/ add at least one complete model');
           return;
         }
-        const name = draftName.trim() || (editing ? editing.name : 'new route');
-        const headers = {
-          'content-type': 'application/json',
-          authorization: `Bearer ${savedKey}`,
-        };
-        try {
-          if (editing) {
+        if (editing) {
+          const name = draftName.trim();
+          if (!name) {
+            setFormError('名称不能为空 / name is required');
+            return;
+          }
+          try {
             await fetchJson(BASE + '/admin/routes/' + encodeURIComponent(editing.id), {
               method: 'PUT',
-              headers,
+              headers: {
+                'content-type': 'application/json',
+                authorization: `Bearer ${savedKey}`,
+              },
               body: JSON.stringify({ name, models }),
             });
-          } else {
-            const id = draftId.trim() || suggestId(name);
-            if (!id) {
-              setError('请填写路由 ID，或输入一个英文/数字名称自动生成');
-              return;
-            }
-            await fetchJson(BASE + '/admin/routes', {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({ id, name, models }),
-            });
+            resetDraft();
+            await load();
+          } catch (e) {
+            setFormError(e && e.message ? e.message : String(e));
           }
+          return;
+        }
+        const name = draftName.trim();
+        const id = draftId.trim();
+        if (!name) {
+          setFormError('请填写名称 / name is required');
+          return;
+        }
+        if (!id) {
+          setFormError('请填写路由 ID（手机端 model 字段要用它，不能自动生成）/ route id is required');
+          return;
+        }
+        try {
+          await fetchJson(BASE + '/admin/routes', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${savedKey}`,
+            },
+            body: JSON.stringify({ id, name, models }),
+          });
           resetDraft();
           await load();
         } catch (e) {
-          setError(e && e.message ? e.message : String(e));
+          setFormError(e && e.message ? e.message : String(e));
         }
       }
 
@@ -622,6 +654,19 @@ window.__ModuleLoader__.load({
         return v.includes(mid);
       }
 
+      // 1.0.5 filter box: display-layer only. Checked state is untouched by
+      // filtering; bulk buttons act on the filtered subset of one provider.
+      function filterMatches(m) {
+        const q = modelFilter.trim().toLowerCase();
+        if (!q) return true;
+        const label = String(m.name || m.id || '').toLowerCase();
+        return label.includes(q) || String(m.id || '').toLowerCase().includes(q);
+      }
+
+      function visibleModelsFor(pid) {
+        return providerModels(pid).filter(filterMatches);
+      }
+
       function setProviderSelection(pid, selected) {
         const all = providerModels(pid).map((m) => m.id);
         const next = { ...visibility };
@@ -631,6 +676,7 @@ window.__ModuleLoader__.load({
           next[pid] = selected;
         }
         setVisibility(next);
+        setVisMsg('');
       }
 
       function toggleModel(pid, mid) {
@@ -642,24 +688,32 @@ window.__ModuleLoader__.load({
         setProviderSelection(pid, next);
       }
 
-      function selectAllProvider(pid) {
-        const next = { ...visibility };
-        delete next[pid];
-        setVisibility(next);
-      }
-
-      function clearProvider(pid) {
-        setVisibility({ ...visibility, [pid]: [] });
-      }
-
-      function invertProvider(pid) {
+      // Bulk ops respect the filter: union with the untouched hidden ids, so
+      // "select all" while filtered = keep hidden checks + add visible ones.
+      function bulkProviderSelection(pid, mode) {
         const all = providerModels(pid).map((m) => m.id);
-        const current = new Set(visibility[pid] === undefined ? all : visibility[pid]);
-        setProviderSelection(pid, all.filter((id) => !current.has(id)));
+        const visibleIds = new Set(visibleModelsFor(pid).map((m) => m.id));
+        if (!visibleIds.size) return;
+        const current = visibility[pid] === undefined ? new Set(all) : new Set(visibility[pid]);
+        let next;
+        if (mode === 'all') {
+          next = new Set(all);
+        } else if (mode === 'clear') {
+          next = new Set([...current].filter((id) => !visibleIds.has(id)));
+        } else {
+          next = new Set(current);
+          for (const id of all) {
+            if (!visibleIds.has(id)) continue;
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+          }
+        }
+        setProviderSelection(pid, [...next]);
       }
 
       function showAllModels() {
         setVisibility({});
+        setVisMsg('');
       }
 
       function normalizeVisibility() {
@@ -672,12 +726,13 @@ window.__ModuleLoader__.load({
         return out;
       }
 
-      async function saveForwarding() {
+      // 1.0.5 split saves: each block submits only its own fields.
+      async function saveGatewayBlock() {
         setSaving(true);
         setError('');
+        setGatewayMsg('');
         try {
           const body = {
-            modelVisibility: normalizeVisibility(),
             settings: {
               defaultTimeoutMs: Number(settingsDraft.defaultTimeoutMs) || 60000,
               maxRetryPerModel: Number(settingsDraft.maxRetryPerModel) || 0,
@@ -694,9 +749,33 @@ window.__ModuleLoader__.load({
             },
             body: JSON.stringify(body),
           });
+          setGatewayMsg('已保存 / saved');
+          setTimeout(() => setGatewayMsg(''), 2000);
           await load();
         } catch (e) {
-          setError(e && e.message ? e.message : String(e));
+          setGatewayMsg('失败：' + (e && e.message ? e.message : String(e)));
+        } finally {
+          setSaving(false);
+        }
+      }
+
+      async function saveVisibilityBlock() {
+        setSaving(true);
+        setError('');
+        setVisMsg('');
+        try {
+          await fetchJson(BASE + '/admin/settings', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${savedKey}`,
+            },
+            body: JSON.stringify({ modelVisibility: normalizeVisibility() }),
+          });
+          setVisMsg('已保存 / saved');
+          setTimeout(() => setVisMsg(''), 2000);
+        } catch (e) {
+          setVisMsg('失败：' + (e && e.message ? e.message : String(e)));
         } finally {
           setSaving(false);
         }
@@ -764,9 +843,17 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
-        // -------- gateway --------
+        // -------- gateway (collapsible, self-contained save) --------
         h('div', { style: styles.card },
-          h('div', { style: { fontWeight: 600, marginBottom: 6 } }, '网关地址与 Key / Gateway URL & Key'),
+          h('div', {
+            style: { ...styles.providerHeader, borderBottom: gatewayOpen ? styles.providerHeader.borderBottom : 'none' },
+            onClick: () => setGatewayOpen((v) => !v),
+          },
+            h('div', { style: { fontWeight: 600 } }, '网关地址与 Key / Gateway URL & Key'),
+            h('span', { style: styles.muted }, gatewayOpen ? '收起' : '展开'),
+          ),
+          gatewayOpen
+            ? h('div', null,
           h('div', { style: styles.label }, 'BaseURL'),
           h('div', { style: styles.row },
             h('input', { readOnly: true, value: phoneBase, style: { ...styles.input, flex: 1 } }),
@@ -795,7 +882,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...styles.muted, marginTop: 6 } },
             masked
               ? '当前为受限视图：完整 Key 与编辑功能只在 DSH 本机或已登录会话中开放。'
-              : '客户端填 BaseURL + Key（Authorization: Bearer <Key>），改完点下方"保存设置"。'),
+              : '客户端填 BaseURL + Key（Authorization: Bearer <Key>），改完点本块的"保存本块"。'),
           // -------- advanced knobs --------
           masked
             ? null
@@ -837,6 +924,21 @@ window.__ModuleLoader__.load({
           ),
           h('div', { style: { ...styles.muted, marginTop: 6 } },
             '模型失败后在冷却期内被路由直接跳过，不再浪费超时等待；0=关闭冷却。'),
+          masked
+            ? null
+            : h('div', { style: { ...styles.row, marginTop: 10 } },
+                h('button', {
+                  type: 'button',
+                  style: styles.btnPrimary,
+                  onClick: saveGatewayBlock,
+                  disabled: saving,
+                }, saving ? '保存中…' : '保存本块（Key + 高级设置）'),
+                gatewayMsg
+                  ? h('span', { style: { fontSize: 12, color: gatewayMsg.startsWith('失败') ? '#dc2626' : '#059669' } }, gatewayMsg)
+                  : null,
+              ),
+            )
+            : null,
         ),
 
         // -------- routes --------
@@ -905,7 +1007,7 @@ window.__ModuleLoader__.load({
               ),
             ),
 
-        // -------- new / edit route (collapsed by default) --------
+        // -------- new / edit route (both entries coexist, 1.0.5) --------
         h('div', {
           ref: editFormRef,
           style: {
@@ -914,22 +1016,41 @@ window.__ModuleLoader__.load({
             display: masked ? 'none' : 'block',
           },
         },
-          h('div', {
-            style: { ...styles.providerHeader, borderBottom: formOpen ? styles.providerHeader.borderBottom : 'none', cursor: 'pointer' },
-            onClick: () => setFormOpen((v) => !v),
-          },
-            h('div', { style: { fontWeight: 600, color: editing ? '#4f46e5' : undefined } },
-              editing ? `✎ 正在编辑路由组：${editing.name || editing.id}` : '新建路由组 / New route group'),
+          h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+            // Two always-visible entries: clicking one switches the form mode
+            // instead of hiding the other (the old single header made "create"
+            // vanish the moment you edited anything).
+            h('div', { style: styles.row },
+              h('button', {
+                type: 'button',
+                style: editing ? styles.btn : styles.btnPrimary,
+                onClick: startCreate,
+              }, '新建'),
+              editing
+                ? h('button', { type: 'button', style: styles.btnPrimary, disabled: true },
+                    `编辑中：${editing.name || editing.id}`)
+                : null,
+            ),
             h('span', { style: styles.muted }, formOpen ? '收起' : '展开'),
           ),
+          h('div', {
+            style: { ...styles.providerHeader, borderBottom: 'none', cursor: 'pointer' },
+            onClick: () => setFormOpen((v) => !v),
+          },
+            h('div', { style: styles.muted },
+              formOpen
+                ? editing
+                  ? '表单展开中（改动点“保存”才生效，“取消编辑”回到新建）'
+                  : '表单展开中'
+                : '点此处展开表单'),
+          ),
+          formError
+            ? h('div', { style: { color: '#dc2626', fontSize: 13, margin: '4px 0' } }, formError)
+            : null,
           formOpen
             ? h('div', null,
-          editing
-            ? h('div', { style: { ...styles.muted, marginTop: 4, marginBottom: 8 } },
-                '改动仅在此表单内，点“保存”才会生效；“取消编辑”回到收起状态。')
-            : null,
           h('div', { style: styles.label },
-            editing ? 'ID（创建后不可修改，手机端以此寻址） / ID (fixed after create)' : 'ID（手机端 model 字段填它；留空自动从名称生成） / ID (the model name clients call)'),
+            editing ? 'ID（创建后不可修改，手机端以此寻址） / ID (fixed after create)' : 'ID（必填，手机端 model 字段填它） / ID (required, clients address this route by it)'),
           h('input', {
             value: draftId,
             readOnly: !!editing,
@@ -1029,7 +1150,7 @@ window.__ModuleLoader__.load({
               style: styles.btn,
               onClick: () => setDraftModels(draftModels.concat([{ provider: '', model: '' }])),
             }, '添加模型'),
-            h('button', { type: 'button', style: styles.btnPrimary, onClick: saveRoute }, '保存'),
+            h('button', { type: 'button', style: styles.btnPrimary, onClick: saveRoute }, editing ? '保存修改' : '创建路由组'),
             editing
               ? h('button', { type: 'button', style: styles.btn, onClick: resetDraft }, '取消编辑')
               : null,
@@ -1049,18 +1170,37 @@ window.__ModuleLoader__.load({
                 : h('button', {
                     type: 'button',
                     style: styles.btnPrimary,
-                    onClick: saveForwarding,
+                    onClick: saveVisibilityBlock,
                     disabled: saving,
-                  }, saving ? '保存中…' : '保存设置 / Save'),
+                  }, saving ? '保存中…' : '保存本块（勾选）'),
+              visMsg
+                ? h('span', { style: { fontSize: 12, color: visMsg.startsWith('失败') ? '#dc2626' : '#059669' } }, visMsg)
+                : null,
             ),
           ),
-          h('div', { style: { ...styles.muted, marginTop: 4, marginBottom: 8 } },
+          h('div', { style: { ...styles.muted, marginTop: 4 } },
             '取消勾选的模型不会出现在外部拉取的模型列表里；路由组始终显示。'),
+          masked
+            ? null
+            : h('div', { style: { ...styles.row, margin: '6px 0' } },
+                h('input', {
+                  value: modelFilter,
+                  onChange: (e) => setModelFilter(e.target.value),
+                  placeholder: '筛选模型（只影响显示；全选/反选/清空只作用于筛出的结果）',
+                  style: { ...styles.input, flex: 1 },
+                }),
+                modelFilter
+                  ? h('button', { type: 'button', style: styles.btn, onClick: () => setModelFilter('') }, '清除筛选')
+                  : null,
+              ),
           providers.map((p) => {
             const models = Array.isArray(p.models) ? p.models : [];
+            const visible = models.filter(filterMatches);
+            if (modelFilter.trim() && !visible.length) return null;
             const v = visibility[p.id];
             const selectedCount = v === undefined ? models.length : v.length;
-            const isOpen = !!expanded[p.id];
+            const filtering = !!modelFilter.trim();
+            const isOpen = filtering ? true : !!expanded[p.id];
             return h('div', { key: p.id },
               h('div', {
                 style: styles.providerHeader,
@@ -1069,19 +1209,21 @@ window.__ModuleLoader__.load({
                 h('div', { style: { fontWeight: 500, fontSize: 13 } },
                   `${p.name || p.id}`,
                   h('span', { style: { ...styles.muted, marginLeft: 6 } },
-                    `${selectedCount}/${models.length}`),
+                    filtering
+                      ? `已选 ${selectedCount}/${models.length} · 筛出 ${visible.length}`
+                      : `${selectedCount}/${models.length}`),
                 ),
-                h('span', { style: styles.muted }, isOpen ? '收起' : '展开'),
+                h('span', { style: styles.muted }, filtering ? '筛选中' : isOpen ? '收起' : '展开'),
               ),
               isOpen
                 ? h('div', null,
                     h('div', { style: { ...styles.row, marginTop: 6 } },
-                      h('button', { type: 'button', style: styles.btn, onClick: () => selectAllProvider(p.id) }, '全选'),
-                      h('button', { type: 'button', style: styles.btn, onClick: () => invertProvider(p.id) }, '反选'),
-                      h('button', { type: 'button', style: styles.btn, onClick: () => clearProvider(p.id) }, '清空'),
+                      h('button', { type: 'button', style: styles.btn, onClick: () => bulkProviderSelection(p.id, 'all') }, '全选'),
+                      h('button', { type: 'button', style: styles.btn, onClick: () => bulkProviderSelection(p.id, 'invert') }, '反选'),
+                      h('button', { type: 'button', style: styles.btn, onClick: () => bulkProviderSelection(p.id, 'clear') }, '清空'),
                     ),
                     h('div', { style: styles.modelGrid },
-                      models.map((m) =>
+                      visible.map((m) =>
                         h('label', { key: m.id, style: styles.check },
                           h('input', {
                             type: 'checkbox',

@@ -21,7 +21,7 @@
 | defaultTimeoutMs | 60000 | 单模型请求超时，超时即降级 |
 | maxRetryPerModel | 1 | 单模型失败后重试次数，再往下走链条 |
 | failureCooldownMs | 60000 | 整链失败后模型进入冷却，期间路由直接跳过；成功一次即清除；0 关闭 |
-| modelVisibility | {}（全部可见） | 各提供商对外可见模型白名单（卡片按提供商 全选/反选/清空） |
+| modelVisibility | {}（全部可见） | 各提供商对外可见模型白名单；卡片带筛选框，全选/反选/清空只作用于筛出的结果，勾选状态跨筛选保留 |
 | routes | [] | 顺序降级路由组 |
 
 状态文件：<DSH_PROFILE_DIR|DSH_HOME|~/.dsh>/dsh-model-router-gateway-state.json。
@@ -37,8 +37,8 @@ AUTH、SERVER、TIMEOUT…）。首 token 之前的任何失败、超时、空�
 
 ## 路由 ID 约定
 
-ID 是客户端寻址契约：创建时定好（default、fast、coding；
-规则 [A-Za-z0-9][A-Za-z0-9_.-]{0,63}），之后不可改。留空自动按名称生成。
+ID 是客户端寻址契约：**创建时必填**（default、fast、coding；
+规则 [A-Za-z0-9][A-Za-z0-9_.-]{0,63}），之后不可改。缺失或非法会有明确的就近提示。
 
 ## 用 patch 声明默认路由（可选）
 
