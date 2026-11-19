@@ -716,6 +716,14 @@ window.__ModuleLoader__.load({
         setVisMsg('');
       }
 
+      // Mirror of showAllModels: every provider collapses to an empty list.
+      function hideAllModels() {
+        const next = {};
+        for (const p of providers) next[p.id] = [];
+        setVisibility(next);
+        setVisMsg('');
+      }
+
       function normalizeVisibility() {
         const out = {};
         for (const p of providers) {
@@ -829,7 +837,7 @@ window.__ModuleLoader__.load({
         // -------- intro: one sentence, then the full guide right below it --------
         h('div', { style: { ...styles.card, marginTop: 6 } },
           h('div', { style: { fontSize: 13, lineHeight: 1.5 } },
-            '把 DSH 能调用的所有模型组成顺序降级链，用一个 OpenAI 兼容网关（BaseURL + Key）暴露给手机和任何外部客户端——模型 A 没额度/限流/报错时无感切到 B，对话不中断。'),
+            '给 DSH 的全部模型做顺序降级路由，经 OpenAI 兼容网关暴露给外部客户端。详情见下方。'),
           h('div', {
             style: { ...styles.providerHeader, borderBottom: 'none', cursor: 'pointer', marginTop: 6 },
             onClick: toggleDocs,
@@ -1165,6 +1173,7 @@ window.__ModuleLoader__.load({
             h('div', { style: { fontWeight: 600 } }, '对外展示的模型 / Visible models'),
             h('div', { style: styles.row },
               h('button', { type: 'button', style: styles.btn, onClick: showAllModels }, '全部显示'),
+              h('button', { type: 'button', style: styles.btn, onClick: hideAllModels }, '全部隐藏'),
               masked
                 ? null
                 : h('button', {

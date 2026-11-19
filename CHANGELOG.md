@@ -28,6 +28,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own fields, with an inline 已保存/失败 status. Finding one global 保存
   button below unrelated sections is over.
 - The gateway block can now collapse like the other sections (default open).
+- **全部隐藏 button** next to 全部显示 in the visibility block: one click
+  clears every provider's list (a `{provider: []}` map that saves and reloads
+  exactly as the per-provider bulk ops do).
+- The card intro is now a genuine one-liner ("详情见下方"), matching the
+  collapsible full guide beneath it instead of front-loading a paragraph.
 
 ### Security
 
