@@ -3,6 +3,27 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.0.6 — 2026-11-23
+
+### Fixed
+
+- **Model exposure actually hides models now**: the card saves "all unchecked"
+  for a provider as an empty array, but the gateway treated an empty array as
+  "no filter" and exposed the whole provider. An empty list now hides every
+  model of that provider (`/v1/models` and the "全部隐藏" button follow the
+  card's real semantics).
+- **Hidden models can no longer be called directly**: `provider:model` calls
+  are checked against the exposure list, so knowing a hidden model id no
+  longer bypasses the card.
+- **Long generations no longer trip first-byte watchdogs**: `/v1/chat/completions`
+  with `stream: true` now opens the SSE response immediately with comment
+  frames (`: connected`, then `: ping` every 8s) while the answer is being
+  generated. Mobile agent clients (DeepWrite and similar) that abort after a
+  few idle seconds now keep the connection through long generations.
+- **First SSE chunk carries `role: "assistant"`** for strict agent clients.
+- **CORS headers on every API response** so webview-based clients can call the
+  gateway (the standalone LAN listener already had them).
+
 ## 1.0.5 — 2026-11-18
 
 ### Fixed
