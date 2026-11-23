@@ -922,7 +922,9 @@ function makeHandler(ctx, state) {
       for (const p of providers) {
         const allow = Array.isArray(visibility[p.id]) ? visibility[p.id] : null;
         for (const m of p.models ?? []) {
-          if (allow && allow.length > 0 && !allow.includes(m.id)) continue;
+          // Empty allow-list means "everything unchecked" (card semantics), so
+          // an explicit empty array hides the whole provider. No entry = all visible.
+          if (allow && !allow.includes(m.id)) continue;
           data.push({
             id: `${p.id}:${m.id}`,
             object: 'model',
@@ -995,6 +997,13 @@ function makeHandler(ctx, state) {
             );
             return;
           }
+          // Exposure gate: a model hidden on the card must not be callable even
+          // when the caller knows its "provider:model" id.
+          const exposed = state.modelVisibility?.[provider];
+          if (Array.isArray(exposed) && !exposed.includes(modelId)) {
+            openAiError(res, 400, `model "${model}" is not exposed on this gateway`, 'invalid_request_error');
+            return;
+          }
           const text = await callSingleModel(ctx, provider, modelId, opts, controller.signal);
           result = { text, model: { provider, model: modelId } };
           usedModel = `${provider}/${modelId}`;
@@ -1031,6 +1040,18 @@ function makeHandler(ctx, state) {
         });
         const id = newCompletionId();
         const created = nowSeconds();
+        // OpenAI-compatible clients expect the first chunk to announce the
+        // assistant role; some strict parsers (agent SDKs) reject streams that
+        // jump straight to content.
+        res.write(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model: usedModel,
+            choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+          })}\n\n`,
+        );
         const piece = 28;
         for (let at = 0; at < result.text.length; at += piece) {
           const content = result.text.slice(at, at + piece);
