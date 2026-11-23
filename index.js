@@ -726,6 +726,20 @@ function makeHandler(ctx, state) {
   const isTrustedRequest = makeTrustedRequestCheck(ctx);
 
   async function handle(req, res, opts = {}) {
+    // API is key-authenticated, not cookie-authenticated, so wildcard CORS is
+    // safe here and lets webview-based clients (mobile writing apps) call it.
+    try {
+      res.setHeader('access-control-allow-origin', '*');
+      res.setHeader('access-control-allow-headers', 'authorization, content-type');
+      res.setHeader('access-control-allow-methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+    } catch {
+      /* headers may already be sent */
+    }
     // opts.trusted: set by the LAN listener, which has no DSH auth layer at
     // all — those requests rely purely on the gateway key and may read the
     // local-only surfaces only when the operator asked for a LAN exposure.
@@ -976,8 +990,57 @@ function makeHandler(ctx, state) {
       req.on('close', onClose);
       req.on('aborted', onClose);
 
+      const route = routes.get(model);
+      let single = null;
+      if (!route) {
+        const idx = model.indexOf(':');
+        const provider = idx > 0 ? model.slice(0, idx) : '';
+        const modelId = idx > 0 ? model.slice(idx + 1) : model;
+        if (!provider) {
+          openAiError(
+            res,
+            400,
+            `unknown model "${model}": use a route id or "provider:model"`,
+            'bad_request_error',
+          );
+          return;
+        }
+        // Exposure gate: a model hidden on the card must not be callable even
+        // when the caller knows its "provider:model" id.
+        const exposed = state.modelVisibility?.[provider];
+        if (Array.isArray(exposed) && !exposed.includes(modelId)) {
+          openAiError(res, 400, `model "${model}" is not exposed on this gateway`, 'invalid_request_error');
+          return;
+        }
+        single = { provider, modelId };
+      }
+
+      // Buffered streaming note: the answer is generated in full before the
+      // first token can flow, so open the SSE stream immediately and keep it
+      // alive with comment frames. Mobile agent clients with a first-byte
+      // watchdog otherwise abort long generations and retry in a loop.
+      let heartbeat = null;
+      if (stream) {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+          'x-accel-buffering': 'no',
+        });
+        res.write(': connected\n\n');
+        heartbeat = setInterval(() => {
+          try {
+            res.write(': ping\n\n');
+          } catch {
+            /* socket already gone */
+          }
+        }, 8000);
+        res.on('close', () => {
+          if (heartbeat) clearInterval(heartbeat);
+        });
+      }
+
       try {
-        const route = routes.get(model);
         let result;
         let usedModel = model;
         if (route) {
@@ -985,28 +1048,14 @@ function makeHandler(ctx, state) {
           const hit = result.model || {};
           usedModel = `${hit.provider || 'unknown'}/${hit.model || '?'}`;
         } else {
-          const idx = model.indexOf(':');
-          const provider = idx > 0 ? model.slice(0, idx) : '';
-          const modelId = idx > 0 ? model.slice(idx + 1) : model;
-          if (!provider) {
-            openAiError(
-              res,
-              400,
-              `unknown model "${model}": use a route id or "provider:model"`,
-              'bad_request_error',
-            );
-            return;
-          }
-          // Exposure gate: a model hidden on the card must not be callable even
-          // when the caller knows its "provider:model" id.
-          const exposed = state.modelVisibility?.[provider];
-          if (Array.isArray(exposed) && !exposed.includes(modelId)) {
-            openAiError(res, 400, `model "${model}" is not exposed on this gateway`, 'invalid_request_error');
-            return;
-          }
+          const { provider, modelId } = single;
           const text = await callSingleModel(ctx, provider, modelId, opts, controller.signal);
           result = { text, model: { provider, model: modelId } };
           usedModel = `${provider}/${modelId}`;
+        }
+        if (heartbeat) {
+          clearInterval(heartbeat);
+          heartbeat = null;
         }
 
         if (!stream) {
@@ -1031,13 +1080,16 @@ function makeHandler(ctx, state) {
           return;
         }
 
-        // SSE: emit the aggregated answer in small chunks
-        res.writeHead(200, {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-cache',
-          connection: 'keep-alive',
-          'x-accel-buffering': 'no',
-        });
+        // SSE: the stream was already opened before generation started; emit
+        // the role chunk first, then the aggregated answer in small chunks.
+        if (!res.headersSent) {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache',
+            connection: 'keep-alive',
+            'x-accel-buffering': 'no',
+          });
+        }
         const id = newCompletionId();
         const created = nowSeconds();
         // OpenAI-compatible clients expect the first chunk to announce the
@@ -1077,6 +1129,10 @@ function makeHandler(ctx, state) {
         res.write('data: [DONE]\n\n');
         res.end();
       } catch (error) {
+        if (heartbeat) {
+          clearInterval(heartbeat);
+          heartbeat = null;
+        }
         if (res.headersSent) {
           try {
             res.write(
