@@ -237,6 +237,103 @@ function toDshMessages(openaiMessages) {
 // model call + ordered fallback
 // ---------------------------------------------------------------------------
 
+// Streaming variants (v1.1): forward token deltas as they arrive instead of
+// buffering the whole answer. Pre-first-token failures fall back down the
+// route; once a token has been emitted the stream must not silently switch.
+async function streamSingleModel(ctx, provider, model, opts, signal, emit) {
+  const llm = getLlm(ctx);
+  if (!llm || typeof llm.stream !== 'function') {
+    throw new Error('llm service is unavailable');
+  }
+  const label = `${provider}/${model}`;
+  let started = false;
+  let failure = null;
+  let stream;
+  try {
+    stream = llm.stream({
+      provider,
+      model,
+      messages: opts.messages,
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    throw new Error(`${label}: ${error?.message ?? error}`);
+  }
+  try {
+    for await (const chunk of stream) {
+      if (!chunk || typeof chunk !== 'object') continue;
+      if (chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
+        if (!started) {
+          started = true;
+          emit({ kind: 'start' });
+        }
+        emit({ kind: 'text', text: chunk.text });
+      } else if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text) {
+        if (!started) {
+          started = true;
+          emit({ kind: 'start' });
+        }
+        emit({ kind: 'reasoning', text: chunk.text });
+      } else if (chunk.type === 'finish') {
+        const reason = chunk.reason;
+        if (reason && (reason.kind === 'error' || reason.kind === 'aborted')) {
+          const f = reason.failure ?? {};
+          failure = `${f.code ?? 'UNKNOWN'}: ${f.message ?? 'stream failed'}`;
+        }
+      }
+    }
+  } catch (error) {
+    throw new Error(`${label}: ${error?.message ?? error}`);
+  }
+  if (failure) throw new Error(`${label}: ${failure}`);
+  if (!started) throw new Error(`${label}: empty response`);
+}
+
+async function streamRoute(ctx, route, opts, signal, state, emit) {
+  const { timeoutMs, maxRetry, failures } = state;
+  const now = Date.now();
+  const models = Array.isArray(route.models) ? route.models : [];
+  const errors = [];
+  for (const ref of models) {
+    if (!ref || !ref.provider || !ref.model) continue;
+    const key = `${ref.provider}/${ref.model}`;
+    const cooldownUntil = failures.get(key);
+    if (cooldownUntil && cooldownUntil > now) {
+      errors.push(`${key}: cooling`);
+      continue;
+    }
+    if (cooldownUntil) failures.delete(key);
+    let started = false;
+    const track = (ev) => {
+      if (ev.kind === 'start') started = true;
+      emit(ev);
+    };
+    for (let attempt = 0; attempt <= maxRetry; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+      const onAbort = () => controller.abort(signal?.reason);
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        await streamSingleModel(ctx, ref.provider, ref.model, opts, controller.signal, track);
+        failures.delete(key);
+        return { model: ref };
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        if (started) throw error; // partial output: do not switch silently
+        errors.push(`${key}: ${error?.message ?? error}`);
+      } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      }
+    }
+    failures.set(key, now + state.failureCooldownMs);
+  }
+  if (models.length === 0) throw new Error('route has no models');
+  throw new Error(`all models failed: ${errors.join('; ')}`);
+}
+
 async function callSingleModel(ctx, provider, model, opts, signal) {
   const llm = getLlm(ctx);
   if (!llm || typeof llm.stream !== 'function') {
@@ -1041,6 +1138,40 @@ function makeHandler(ctx, state) {
       }
 
       try {
+        if (stream) {
+          const id = newCompletionId();
+          const created = nowSeconds();
+          const send = (delta, finishReason = null) => {
+            res.write(
+              `data: ${JSON.stringify({
+                id,
+                object: 'chat.completion.chunk',
+                created,
+                model,
+                choices: [{ index: 0, delta, finish_reason: finishReason }],
+              })}\n\n`,
+            );
+          };
+          send({ role: 'assistant', content: '' });
+          const emit = (ev) => {
+            if (heartbeat) {
+              clearInterval(heartbeat);
+              heartbeat = null;
+            }
+            if (ev.kind === 'text') send({ content: ev.text });
+            else if (ev.kind === 'reasoning') send({ reasoning_content: ev.text });
+          };
+          if (route) {
+            await streamRoute(ctx, route, opts, controller.signal, state, emit);
+          } else {
+            await streamSingleModel(ctx, single.provider, single.modelId, opts, controller.signal, emit);
+          }
+          send({}, 'stop');
+          res.write('data: [DONE]\n\n');
+          res.end();
+          return;
+        }
+
         let result;
         let usedModel = model;
         if (route) {
@@ -1053,81 +1184,25 @@ function makeHandler(ctx, state) {
           result = { text, model: { provider, model: modelId } };
           usedModel = `${provider}/${modelId}`;
         }
-        if (heartbeat) {
-          clearInterval(heartbeat);
-          heartbeat = null;
-        }
-
-        if (!stream) {
-          json(res, 200, {
-            id: newCompletionId(),
-            object: 'chat.completion',
-            created: nowSeconds(),
-            model: usedModel,
-            choices: [
-              {
-                index: 0,
-                message: { role: 'assistant', content: result.text },
-                finish_reason: 'stop',
-              },
-            ],
-            usage: {
-              prompt_tokens: estimateTokens(opts.messages),
-              completion_tokens: result.text.length,
-              total_tokens: estimateTokens(opts.messages) + result.text.length,
+        json(res, 200, {
+          id: newCompletionId(),
+          object: 'chat.completion',
+          created: nowSeconds(),
+          model: usedModel,
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: result.text },
+              finish_reason: 'stop',
             },
-          });
-          return;
-        }
-
-        // SSE: the stream was already opened before generation started; emit
-        // the role chunk first, then the aggregated answer in small chunks.
-        if (!res.headersSent) {
-          res.writeHead(200, {
-            'content-type': 'text/event-stream; charset=utf-8',
-            'cache-control': 'no-cache',
-            connection: 'keep-alive',
-            'x-accel-buffering': 'no',
-          });
-        }
-        const id = newCompletionId();
-        const created = nowSeconds();
-        // OpenAI-compatible clients expect the first chunk to announce the
-        // assistant role; some strict parsers (agent SDKs) reject streams that
-        // jump straight to content.
-        res.write(
-          `data: ${JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model: usedModel,
-            choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-          })}\n\n`,
-        );
-        const piece = 28;
-        for (let at = 0; at < result.text.length; at += piece) {
-          const content = result.text.slice(at, at + piece);
-          res.write(
-            `data: ${JSON.stringify({
-              id,
-              object: 'chat.completion.chunk',
-              created,
-              model: usedModel,
-              choices: [{ index: 0, delta: { content }, finish_reason: null }],
-            })}\n\n`,
-          );
-        }
-        res.write(
-          `data: ${JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model: usedModel,
-            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-          })}\n\n`,
-        );
-        res.write('data: [DONE]\n\n');
-        res.end();
+          ],
+          usage: {
+            prompt_tokens: estimateTokens(opts.messages),
+            completion_tokens: result.text.length,
+            total_tokens: estimateTokens(opts.messages) + result.text.length,
+          },
+        });
+        return;
       } catch (error) {
         if (heartbeat) {
           clearInterval(heartbeat);
