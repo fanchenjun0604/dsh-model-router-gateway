@@ -80,6 +80,16 @@ export const Config =
         failureCooldownMs: schemaMod.number().default(60000).volatile(),
         publicPort: schemaMod.number().default(0).volatile(),
         modelVisibility: schemaMod.dict(schemaMod.array(schemaMod.string())).default({}).volatile(),
+        gatewayKeys: schemaMod
+          .array(
+            schemaMod.object({
+              name: schemaMod.string().default(''),
+              key: schemaMod.string().required(),
+              route: schemaMod.string().default(''),
+            }),
+          )
+          .default([])
+          .volatile(),
         navEnabled: schemaMod.boolean().default(false).volatile(),
         routes: schemaMod
           .array(
@@ -546,6 +556,7 @@ function writeStateFile(state) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const payload = {
       gatewayKey: state.gatewayKey,
+      gatewayKeys: state.gatewayKeys ?? [],
       modelVisibility: state.modelVisibility ?? {},
       navEnabled: state.navEnabled === true,
       routes: [...state.routes.values()],
@@ -973,6 +984,7 @@ function makeHandler(ctx, state) {
       json(res, 200, {
         ok: true,
         gatewayKey: state.gatewayKey,
+        gatewayKeys: state.gatewayKeys ?? [],
         basePath: PRIMARY,
         publicPort,
         lanIps: lanAddresses(),
@@ -1012,15 +1024,23 @@ function makeHandler(ctx, state) {
     // ----- auth -----
     const auth = req.headers?.authorization ?? '';
     const token = String(auth).replace(/^Bearer\s+/i, '').trim();
-    if (!token || token !== state.gatewayKey) {
+    const keyEntry = token ? findGatewayKey(state, token) : null;
+    if (!token || !keyEntry) {
       openAiError(res, 401, 'Invalid gateway key', 'auth_error');
       return;
     }
+    // '' = full access (legacy single key or an unscoped entry); otherwise the
+    // key may only see and call that one route.
+    const keyScope = keyEntry.route || '';
 
     // Admin mutations ride the same trust fence: a valid gateway key alone is
     // not enough from off-box; it must come from a local/LAN/trusted surface.
     const isAdmin =
       pathname.startsWith(PRIMARY + '/admin/');
+    if (isAdmin && keyScope) {
+      openAiError(res, 403, `this key is restricted to route "${keyScope}" and cannot manage the gateway`, 'auth_error');
+      return;
+    }
     if (isAdmin && !opts.lanOnly) {
       const trusted = await isTrustedRequest(req);
       if (!trusted) {
@@ -1040,6 +1060,9 @@ function makeHandler(ctx, state) {
       }
       if (typeof body.gatewayKey === 'string' && body.gatewayKey.trim()) {
         state.gatewayKey = body.gatewayKey.trim();
+      }
+      if (Array.isArray(body.gatewayKeys)) {
+        state.gatewayKeys = normalizeGatewayKeys(body.gatewayKeys);
       }
       if (body.modelVisibility && typeof body.modelVisibility === 'object') {
         const next = {};
@@ -1114,6 +1137,7 @@ function makeHandler(ctx, state) {
       const data = [];
       for (const [id, route] of routes) {
         if (route.enabled === false) continue;
+        if (keyScope && id !== keyScope) continue;
         data.push({
           id,
           object: 'model',
@@ -1122,6 +1146,11 @@ function makeHandler(ctx, state) {
           route: true,
           name: route.name || id,
         });
+      }
+      if (keyScope) {
+        // Route-scoped keys never see the provider catalog.
+        json(res, 200, { object: 'list', data });
+        return;
       }
       const providers = await listProviderCatalog(ctx);
       const visibility = state.modelVisibility ?? {};
@@ -1208,6 +1237,16 @@ function makeHandler(ctx, state) {
         single = { provider, modelId };
       }
 
+      // Route-scoped keys may only call their own route.
+      if (keyScope && (!route || model !== keyScope)) {
+        openAiError(
+          res,
+          400,
+          `this key is restricted to route "${keyScope}"; use model "${keyScope}"`,
+          'invalid_request_error',
+        );
+        return;
+      }
       // Buffered streaming note: the answer is generated in full before the
       // first token can flow, so open the SSE stream immediately and keep it
       // alive with comment frames. Mobile agent clients with a first-byte
@@ -1486,6 +1525,32 @@ async function handleAdmin(req, res, pathname, state, ctx) {
   json(res, 405, { ok: false, error: 'method not allowed' });
 }
 
+function normalizeGatewayKeys(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const e of list) {
+    if (!e || typeof e.key !== 'string') continue;
+    const key = e.key.trim();
+    if (!key) continue;
+    out.push({
+      name: String(e.name ?? ''),
+      key,
+      route: typeof e.route === 'string' ? e.route.trim() : '',
+    });
+  }
+  return out;
+}
+
+/** Resolve a bearer token to its key entry; the legacy single key stays valid. */
+function findGatewayKey(state, token) {
+  if (!token) return null;
+  if (token === state.gatewayKey) return { name: 'default', key: state.gatewayKey, route: '' };
+  for (const entry of state.gatewayKeys ?? []) {
+    if (entry && entry.key === token) return entry;
+  }
+  return null;
+}
+
 function normalizeModels(models) {
   if (!Array.isArray(models)) return [];
   return models
@@ -1559,6 +1624,7 @@ export function apply(ctx, config) {
     failureCooldownMs,
     publicPort,
     modelVisibility,
+    gatewayKeys: normalizeGatewayKeys(cfg.gatewayKeys),
     navEnabled: cfg.navEnabled === true,
     failures: new Map(),
     routeCursor: new Map(),
@@ -1593,6 +1659,9 @@ export function apply(ctx, config) {
     }
     if (typeof saved.navEnabled === 'boolean') {
       state.navEnabled = saved.navEnabled;
+    }
+    if (Array.isArray(saved.gatewayKeys)) {
+      state.gatewayKeys = normalizeGatewayKeys(saved.gatewayKeys);
     }
     if (Array.isArray(saved.routes)) {
       routes.clear();

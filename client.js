@@ -271,6 +271,11 @@ window.__ModuleLoader__.load({
       const [visMsg, setVisMsg] = useState('');
       const [navEnabled, setNavEnabled] = useState(false);
       const [navMsg, setNavMsg] = useState('');
+      const [keysDraft, setKeysDraft] = useState([]);
+      const [keyName, setKeyName] = useState('');
+      const [keyRoute, setKeyRoute] = useState('');
+      const [keyValue, setKeyValue] = useState('');
+      const [keysMsg, setKeysMsg] = useState('');
       const editFormRef = useRef(null);
       const moveTimer = useRef(null);
 
@@ -301,6 +306,15 @@ window.__ModuleLoader__.load({
           }
           setVisibility(vis);
           setNavEnabled(data.navEnabled === true);
+          setKeysDraft(
+            Array.isArray(data.gatewayKeys)
+              ? data.gatewayKeys.map((k) => ({
+                  name: String(k.name ?? ''),
+                  key: String(k.key ?? ''),
+                  route: String(k.route ?? ''),
+                }))
+              : [],
+          );
         } catch (e) {
           setError(e && e.message ? e.message : String(e));
         } finally {
@@ -336,6 +350,43 @@ window.__ModuleLoader__.load({
           setNavMsg(`失败：${e && e.message ? e.message : String(e)}`);
         }
       }, [navEnabled, savedKey]);
+
+      function genGatewayKey() {
+        try {
+          if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+            return 'sk-' + globalThis.crypto.randomUUID().replace(/-/g, '');
+          }
+        } catch {
+          /* fall through */
+        }
+        return 'sk-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      }
+
+      function addKeyRow() {
+        const value = keyValue.trim() || genGatewayKey();
+        setKeysDraft([...keysDraft, { name: keyName.trim() || 'key', key: value, route: keyRoute }]);
+        setKeyName('');
+        setKeyValue('');
+      }
+
+      async function saveKeys() {
+        if (!savedKey) return;
+        setKeysMsg('保存中…');
+        try {
+          await fetchJson(BASE + '/admin/settings', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${savedKey}`,
+            },
+            body: JSON.stringify({ gatewayKeys: keysDraft }),
+          });
+          setKeysMsg('已保存');
+          setTimeout(() => setKeysMsg(''), 2500);
+        } catch (e) {
+          setKeysMsg(`失败：${e && e.message ? e.message : String(e)}`);
+        }
+      }
       const origin =
         typeof globalThis !== 'undefined' && globalThis.location
           ? globalThis.location.origin
@@ -917,6 +968,53 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 } },
             navMsg ? h('span', { style: styles.muted }, navMsg) : null,
             h('button', { type: 'button', onClick: toggleNav, style: styles.btn }, navEnabled ? '关闭导航' : '开启导航'),
+          ),
+        ),
+
+        // -------- extra gateway keys (optional scopes) --------
+        h('div', { style: styles.card },
+          h('div', { style: { fontWeight: 600 } }, '更多 Key / Additional keys'),
+          h('div', { style: styles.muted },
+            '默认 Key 始终可用（全量）。这里可以添加更多 Key：作用域选“全部”即平权 Key；选某个路由则该 Key 只能看到并调用该路由。'),
+          (keysDraft || []).map((k, i) =>
+            h('div', { key: i, style: { ...styles.row, marginTop: 6, alignItems: 'center' } },
+              h('span', { style: { fontWeight: 600, minWidth: 70 } }, k.name || 'key'),
+              h('span', { style: { ...styles.muted, flex: 1 } }, k.route ? `仅路由 ${k.route}` : '全部路由'),
+              h('span', { style: { ...styles.muted, fontFamily: 'monospace', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: k.key },
+                k.key.slice(0, 10) + '…'),
+              h('button', {
+                type: 'button',
+                style: styles.btn,
+                onClick: () => setKeysDraft(keysDraft.filter((_, j) => j !== i)),
+              }, '删除'),
+            ),
+          ),
+          h('div', { style: { ...styles.row, marginTop: 8, alignItems: 'center' } },
+            h('input', {
+              value: keyName,
+              onChange: (e) => setKeyName(e.target.value),
+              placeholder: '名称（如 手机）',
+              style: { ...styles.input, width: 110 },
+            }),
+            h('select', {
+              value: keyRoute,
+              onChange: (e) => setKeyRoute(e.target.value),
+              style: { ...styles.input, width: 130 },
+            },
+              h('option', { value: '' }, '全部路由'),
+              routes.map((r) => h('option', { key: r.id, value: r.id }, r.id)),
+            ),
+            h('input', {
+              value: keyValue,
+              onChange: (e) => setKeyValue(e.target.value),
+              placeholder: 'Key 值（留空自动生成）',
+              style: { ...styles.input, flex: 1, fontFamily: 'monospace' },
+            }),
+            h('button', { type: 'button', style: styles.btn, onClick: addKeyRow }, '添加'),
+          ),
+          h('div', { style: { ...styles.row, marginTop: 8, alignItems: 'center' } },
+            h('button', { type: 'button', style: styles.btnPrimary || styles.btn, onClick: saveKeys }, '保存 Key 列表'),
+            keysMsg ? h('span', { style: styles.muted }, keysMsg) : null,
           ),
         ),
 
