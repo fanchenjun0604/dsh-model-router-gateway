@@ -3,6 +3,26 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.1.0 — Unreleased（攒批中）
+
+### Added
+
+- **True streaming**: with `stream: true` the gateway now forwards upstream
+  token deltas as OpenAI SSE chunks as they are generated, instead of
+  buffering the whole answer and slicing it afterwards. First-token latency
+  drops to the upstream's first token (typically 1–3 s), which is what
+  agent clients with short first-token watchdogs (DeepWrite et al.) need.
+  Failed candidates fall back down the route only before the first token;
+  a post-token failure emits an SSE `error` event instead of switching
+  silently. `reasoning-delta` maps to `delta.reasoning_content`.
+
+### Fixed
+
+- **Filter-aware bulk selection**: with the visibility filter active, the
+  per-provider 全选 and the top-level 全部显示/全部隐藏 now act only on the
+  models matching the filter, consistent with 反选/清空 (previously they
+  touched unshown models).
+
 ## 1.0.6 — 2026-11-23
 
 ### Fixed
