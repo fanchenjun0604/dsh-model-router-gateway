@@ -267,6 +267,8 @@ window.__ModuleLoader__.load({
       const [formError, setFormError] = useState('');
       const [gatewayMsg, setGatewayMsg] = useState('');
       const [visMsg, setVisMsg] = useState('');
+      const [navEnabled, setNavEnabled] = useState(false);
+      const [navMsg, setNavMsg] = useState('');
       const editFormRef = useRef(null);
       const moveTimer = useRef(null);
 
@@ -296,6 +298,7 @@ window.__ModuleLoader__.load({
             if (Array.isArray(list)) vis[pid] = list.map(String);
           }
           setVisibility(vis);
+          setNavEnabled(data.navEnabled === true);
         } catch (e) {
           setError(e && e.message ? e.message : String(e));
         } finally {
@@ -309,6 +312,28 @@ window.__ModuleLoader__.load({
 
       const masked = !!(config && config.masked);
       const savedKey = masked ? '' : config && config.gatewayKey ? config.gatewayKey : '';
+
+      const toggleNav = useCallback(async () => {
+        if (!savedKey) return;
+        const next = !navEnabled;
+        setNavMsg('保存中…');
+        try {
+          await fetchJson(BASE + '/admin/settings', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${savedKey}`,
+            },
+            body: JSON.stringify({ navEnabled: next }),
+          });
+          setNavEnabled(next);
+          if (props && props.nav && typeof props.nav.set === 'function') props.nav.set(next);
+          setNavMsg(next ? '已显示在侧边导航' : '已从侧边导航移除');
+          setTimeout(() => setNavMsg(''), 2500);
+        } catch (e) {
+          setNavMsg(`失败：${e && e.message ? e.message : String(e)}`);
+        }
+      }, [navEnabled, savedKey]);
       const origin =
         typeof globalThis !== 'undefined' && globalThis.location
           ? globalThis.location.origin
@@ -889,6 +914,18 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
+        // -------- sidebar navigation toggle (settings page is the default home) --------
+        h('div', { style: { ...styles.card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 } },
+          h('div', null,
+            h('div', { style: { fontWeight: 600, fontSize: 13 } }, '在侧边导航中显示 / Show in sidebar'),
+            h('div', { style: styles.muted }, '默认只在「设置」里打开；开启后左侧导航会多一个入口，插件详情页保持只介绍。'),
+          ),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 } },
+            navMsg ? h('span', { style: styles.muted }, navMsg) : null,
+            h('button', { type: 'button', onClick: toggleNav, style: styles.btn }, navEnabled ? '关闭导航' : '开启导航'),
+          ),
+        ),
+
         // -------- gateway (collapsible, self-contained save) --------
         h('div', { style: styles.card },
           h('div', {
@@ -1334,27 +1371,108 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // Sidebar panel glyph (registered only while the optional entry is on).
+    function NavIcon(size) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 2,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        },
+        h('circle', { cx: 6, cy: 6, r: 2.2 }),
+        h('circle', { cx: 18, cy: 18, r: 2.2 }),
+        h('path', { d: 'M8 6h6a4 4 0 0 1 0 8H8a4 4 0 0 0 0 8h8' }),
+      );
+    }
+
+    function createNavController(ctx) {
+      let offs = [];
+      const clear = () => {
+        for (const off of offs) {
+          try {
+            if (typeof off === 'function') off();
+          } catch {
+            /* already disposed */
+          }
+        }
+        offs = [];
+      };
+      const nav = {
+        set(enabled) {
+          if (enabled) {
+            register();
+          } else {
+            clear();
+            // Leaving the sidebar entry while its panel is open would strand the
+            // main column on a removed panel; send the user back to conversation.
+            try {
+              const layout = typeof ctx.get === 'function' ? ctx.get('layout') : null;
+              if (layout && typeof layout.selectPanel === 'function') layout.selectPanel(null);
+            } catch {
+              /* layout unavailable */
+            }
+          }
+        },
+      };
+      const register = () => {
+        clear();
+        try {
+          offs.push(
+            ctx.slots.register(
+              { name: 'main', key: NS, locale: NS, inject: () => ({ ctx }) },
+              () => h(ModelRouterGatewayCard, { view: 'page', nav }),
+            ),
+          );
+        } catch {
+          /* main seat unavailable in this build */
+        }
+        try {
+          offs.push(
+            ctx.slots.register(
+              { name: 'sidebar.panellist', id: NS, order: 2, label: () => '模型路由', locale: NS, inject: () => ({ ctx }) },
+              (owner = {}) => NavIcon(owner.size ?? 16),
+            ),
+          );
+        } catch {
+          /* panellist seat unavailable in this build */
+        }
+      };
+      return nav;
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
-        // Settings -> Plugins -> Plugin settings, plus the plugins page seats.
-        // `key` for settings.plugin.item MUST equal the settings namespace (row id).
-        for (const [slotName, key] of [
-          ['plugins.bundle.config', PKG],
-          ['plugins.row.config', ROW_CONFIG_KEY],
-          ['settings.plugin.item', NS],
-        ]) {
-          try {
-            ctx.slots.inject(slotName, () =>
-              ctx.slots.register(
-                { name: slotName, key, locale: NS, inject: () => ({ ctx }) },
-                ModelRouterGatewayCard,
-              ),
-            );
-          } catch (e) {
-            /* seat unavailable in this build; try the next one */
-          }
+        // The management UI lives in a dedicated Settings page by default; the
+        // plugin detail page is left to the host's own description/README.
+        const nav = createNavController(ctx);
+        try {
+          ctx.slots.inject('settings.section', () =>
+            ctx.slots.register(
+              {
+                name: 'settings.section',
+                id: NS,
+                order: 45,
+                label: () => '模型路由网关 / Model Router',
+                locale: NS,
+                inject: () => ({ ctx }),
+              },
+              () => h(ModelRouterGatewayCard, { view: 'page', nav }),
+            ),
+          );
+        } catch (e) {
+          /* settings seat unavailable in this build */
         }
+        // Restore the optional sidebar entry from persisted state.
+        fetchJson(BASE + '/config')
+          .then((data) => nav.set(!!(data && data.navEnabled === true)))
+          .catch(() => {});
       },
     };
   },

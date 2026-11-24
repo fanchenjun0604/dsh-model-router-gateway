@@ -80,6 +80,7 @@ export const Config =
         failureCooldownMs: schemaMod.number().default(60000).volatile(),
         publicPort: schemaMod.number().default(0).volatile(),
         modelVisibility: schemaMod.dict(schemaMod.array(schemaMod.string())).default({}).volatile(),
+        navEnabled: schemaMod.boolean().default(false).volatile(),
         routes: schemaMod
           .array(
             schemaMod.object({
@@ -458,6 +459,7 @@ function writeStateFile(state) {
     const payload = {
       gatewayKey: state.gatewayKey,
       modelVisibility: state.modelVisibility ?? {},
+      navEnabled: state.navEnabled === true,
       routes: [...state.routes.values()],
       settings: {
         defaultTimeoutMs: state.timeoutMs,
@@ -887,6 +889,7 @@ function makeHandler(ctx, state) {
         publicPort,
         lanIps: lanAddresses(),
         modelVisibility: state.modelVisibility ?? {},
+        navEnabled: state.navEnabled === true,
         settings: {
           defaultTimeoutMs: state.timeoutMs,
           maxRetryPerModel: state.maxRetry,
@@ -959,6 +962,9 @@ function makeHandler(ctx, state) {
         }
         state.modelVisibility = next;
       }
+      if (typeof body.navEnabled === 'boolean') {
+        state.navEnabled = body.navEnabled;
+      }
       const s = body.settings;
       if (s && typeof s === 'object') {
         if (typeof s.defaultTimeoutMs === 'number' && s.defaultTimeoutMs >= 1000) {
@@ -979,6 +985,7 @@ function makeHandler(ctx, state) {
         persisted: persist.ok,
         ...(persist.reason ? { persistReason: persist.reason } : {}),
         modelVisibility: state.modelVisibility,
+        navEnabled: state.navEnabled === true,
         settings: {
           defaultTimeoutMs: state.timeoutMs,
           maxRetryPerModel: state.maxRetry,
@@ -1431,6 +1438,7 @@ export function apply(ctx, config) {
     failureCooldownMs,
     publicPort,
     modelVisibility,
+    navEnabled: cfg.navEnabled === true,
     failures: new Map(),
     version: readInstalledVersion(),
     pending: null,
@@ -1460,6 +1468,9 @@ export function apply(ctx, config) {
           Array.isArray(v) ? v.map(String) : [],
         ]),
       );
+    }
+    if (typeof saved.navEnabled === 'boolean') {
+      state.navEnabled = saved.navEnabled;
     }
     if (Array.isArray(saved.routes)) {
       routes.clear();
