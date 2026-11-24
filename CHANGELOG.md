@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Tool calling passthrough**: OpenAI `tools` in the request are mapped to the
+  harness `GenerateOptions.tools`; streamed `tool-call-delta` chunks become
+  `delta.tool_calls` (id/name first, arguments incremental), buffered replies
+  return `message.tool_calls` with `finish_reason: "tool_calls"`, and
+  `role: "tool"` results (plus assistant `tool_calls` history) map to the
+  harness tool-result messages with their `tool_call_id`. Agent clients such as
+  DeepWrite can now run their tool loop through the gateway.
 - **Management UI moved out of the plugin page**: the operations card now lives
   in a dedicated Settings page (`设置 → 模型路由网关`). The plugin detail page
   keeps the host's description/README only. A Settings-page switch can pin an
