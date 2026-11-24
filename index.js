@@ -218,6 +218,19 @@ function toDshMessages(openaiMessages) {
     if (m.role === 'system' || m.role === 'developer') role = 'system';
     else if (m.role === 'assistant') role = 'assistant';
     else if (m.role === 'tool') role = 'tool';
+
+    // Tool result turn: the model's tool call id and the textual result.
+    if (role === 'tool') {
+      const callId = String(m.tool_call_id ?? m.toolCallId ?? '');
+      return {
+        role: 'tool',
+        source: { kind: 'tool', callId },
+        toolCallId: callId,
+        content: [{ type: 'text', text: String(m.content ?? '') }],
+        ...(m.is_error === true ? { isError: true } : {}),
+      };
+    }
+
     let content;
     if (Array.isArray(m.content)) {
       content = m.content.map((part) => {
@@ -230,8 +243,43 @@ function toDshMessages(openaiMessages) {
     } else {
       content = [{ type: 'text', text: String(m.content ?? '') }];
     }
+
+    // Assistant turns may carry tool calls from earlier steps; keep them so
+    // the upstream sees the call/result pairs it produced.
+    if (role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      for (const tc of m.tool_calls) {
+        if (!tc || !tc.function) continue;
+        content.push({
+          type: 'tool-call',
+          id: String(tc.id ?? ''),
+          name: String(tc.function.name ?? ''),
+          arguments: String(tc.function.arguments ?? ''),
+        });
+      }
+      return {
+        role,
+        source: { kind: 'model', provider: 'gateway', model: 'history' },
+        content,
+      };
+    }
+
     return { role, content };
   });
+}
+
+function toDshTools(openaiTools) {
+  if (!Array.isArray(openaiTools)) return undefined;
+  const out = [];
+  for (const t of openaiTools) {
+    const fn = t && (t.function || t);
+    if (!fn || typeof fn.name !== 'string' || !fn.name) continue;
+    out.push({
+      name: fn.name,
+      description: typeof fn.description === 'string' ? fn.description : '',
+      parameters: fn.parameters && typeof fn.parameters === 'object' ? fn.parameters : {},
+    });
+  }
+  return out.length ? out : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,11 +298,14 @@ async function streamSingleModel(ctx, provider, model, opts, signal, emit) {
   let started = false;
   let failure = null;
   let stream;
+  const toolSeq = new Map(); // DSH block index -> OpenAI tool-call index
+  let nextToolIndex = 0;
   try {
     stream = llm.stream({
       provider,
       model,
       messages: opts.messages,
+      ...(opts.tools ? { tools: opts.tools } : {}),
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
       ...(signal ? { signal } : {}),
@@ -277,6 +328,19 @@ async function streamSingleModel(ctx, provider, model, opts, signal, emit) {
           emit({ kind: 'start' });
         }
         emit({ kind: 'reasoning', text: chunk.text });
+      } else if (chunk.type === 'tool-call-delta') {
+        if (!started) {
+          started = true;
+          emit({ kind: 'start' });
+        }
+        const key = chunk.index ?? 0;
+        if (!toolSeq.has(key)) {
+          toolSeq.set(key, nextToolIndex++);
+          emit({ kind: 'tool-open', index: toolSeq.get(key), id: chunk.id ?? '', name: chunk.name ?? '' });
+        }
+        if (typeof chunk.argumentsDelta === 'string' && chunk.argumentsDelta) {
+          emit({ kind: 'tool-args', index: toolSeq.get(key), args: chunk.argumentsDelta });
+        }
       } else if (chunk.type === 'finish') {
         const reason = chunk.reason;
         if (reason && (reason.kind === 'error' || reason.kind === 'aborted')) {
@@ -345,11 +409,13 @@ async function callSingleModel(ctx, provider, model, opts, signal) {
   let sawFinish = false;
   let failure = null;
   let stream;
+  const toolCalls = new Map();
   try {
     stream = llm.stream({
       provider,
       model,
       messages: opts.messages,
+      ...(opts.tools ? { tools: opts.tools } : {}),
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
       ...(signal ? { signal } : {}),
@@ -362,6 +428,12 @@ async function callSingleModel(ctx, provider, model, opts, signal) {
       if (!chunk || typeof chunk !== 'object') continue;
       if (chunk.type === 'text-delta') {
         if (typeof chunk.text === 'string') text += chunk.text;
+      } else if (chunk.type === 'tool-call-delta') {
+        const key = chunk.index ?? 0;
+        if (!toolCalls.has(key)) {
+          toolCalls.set(key, { id: String(chunk.id ?? ''), name: String(chunk.name ?? ''), arguments: '' });
+        }
+        if (typeof chunk.argumentsDelta === 'string') toolCalls.get(key).arguments += chunk.argumentsDelta;
       } else if (chunk.type === 'finish') {
         sawFinish = true;
         const reason = chunk.reason;
@@ -375,8 +447,9 @@ async function callSingleModel(ctx, provider, model, opts, signal) {
     throw new Error(`${label}: ${error?.message ?? error}`);
   }
   if (failure) throw new Error(`${label}: ${failure}`);
-  if (!sawFinish && text === '') throw new Error(`${label}: empty response`);
-  return text;
+  const calls = [...toolCalls.values()];
+  if (!sawFinish && text === '' && calls.length === 0) throw new Error(`${label}: empty response`);
+  return { text, toolCalls: calls };
 }
 
 async function callRoute(ctx, route, opts, signal, state) {
@@ -401,10 +474,10 @@ async function callRoute(ctx, route, opts, signal, state) {
       const onAbort = () => controller.abort(signal?.reason);
       if (signal) signal.addEventListener('abort', onAbort, { once: true });
       try {
-        const text = await callSingleModel(ctx, ref.provider, ref.model, opts, controller.signal);
-        if (text.trim() !== '') {
+        const result = await callSingleModel(ctx, ref.provider, ref.model, opts, controller.signal);
+        if (result.text.trim() !== '' || result.toolCalls.length > 0) {
           failures.delete(key); // success clears any history
-          return { text, model: ref };
+          return { text: result.text, toolCalls: result.toolCalls, model: ref };
         }
         lastError = new Error('empty response');
       } catch (error) {
@@ -1076,6 +1149,7 @@ function makeHandler(ctx, state) {
       const stream = body.stream !== false;
       const opts = {
         messages: toDshMessages(body.messages),
+        tools: toDshTools(body.tools),
         temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
         maxTokens:
           typeof body.max_tokens === 'number'
@@ -1160,6 +1234,7 @@ function makeHandler(ctx, state) {
             );
           };
           send({ role: 'assistant', content: '' });
+          let sawTool = false;
           const emit = (ev) => {
             if (heartbeat) {
               clearInterval(heartbeat);
@@ -1167,13 +1242,28 @@ function makeHandler(ctx, state) {
             }
             if (ev.kind === 'text') send({ content: ev.text });
             else if (ev.kind === 'reasoning') send({ reasoning_content: ev.text });
+            else if (ev.kind === 'tool-open') {
+              sawTool = true;
+              send({
+                tool_calls: [
+                  {
+                    index: ev.index,
+                    ...(ev.id ? { id: ev.id } : {}),
+                    type: 'function',
+                    function: { ...(ev.name ? { name: ev.name } : {}), arguments: '' },
+                  },
+                ],
+              });
+            } else if (ev.kind === 'tool-args') {
+              send({ tool_calls: [{ index: ev.index, function: { arguments: ev.args } }] });
+            }
           };
           if (route) {
             await streamRoute(ctx, route, opts, controller.signal, state, emit);
           } else {
             await streamSingleModel(ctx, single.provider, single.modelId, opts, controller.signal, emit);
           }
-          send({}, 'stop');
+          send({}, sawTool ? 'tool_calls' : 'stop');
           res.write('data: [DONE]\n\n');
           res.end();
           return;
@@ -1187,10 +1277,11 @@ function makeHandler(ctx, state) {
           usedModel = `${hit.provider || 'unknown'}/${hit.model || '?'}`;
         } else {
           const { provider, modelId } = single;
-          const text = await callSingleModel(ctx, provider, modelId, opts, controller.signal);
-          result = { text, model: { provider, model: modelId } };
+          const r = await callSingleModel(ctx, provider, modelId, opts, controller.signal);
+          result = { text: r.text, toolCalls: r.toolCalls, model: { provider, model: modelId } };
           usedModel = `${provider}/${modelId}`;
         }
+        const calls = result.toolCalls ?? [];
         json(res, 200, {
           id: newCompletionId(),
           object: 'chat.completion',
@@ -1199,8 +1290,20 @@ function makeHandler(ctx, state) {
           choices: [
             {
               index: 0,
-              message: { role: 'assistant', content: result.text },
-              finish_reason: 'stop',
+              message: {
+                role: 'assistant',
+                content: calls.length ? (result.text || null) : result.text,
+                ...(calls.length
+                  ? {
+                      tool_calls: calls.map((call, i) => ({
+                        id: call.id || `call_${i}`,
+                        type: 'function',
+                        function: { name: call.name, arguments: call.arguments },
+                      })),
+                    }
+                  : {}),
+              },
+              finish_reason: calls.length ? 'tool_calls' : 'stop',
             },
           ],
           usage: {
