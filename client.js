@@ -697,7 +697,10 @@ window.__ModuleLoader__.load({
         const current = visibility[pid] === undefined ? new Set(all) : new Set(visibility[pid]);
         let next;
         if (mode === 'all') {
-          next = new Set(all);
+          // Filter-aware: select-all only adds the models currently shown by
+          // the filter, mirroring 反选/清空 semantics.
+          next = new Set(current);
+          for (const id of visibleIds) next.add(id);
         } else if (mode === 'clear') {
           next = new Set([...current].filter((id) => !visibleIds.has(id)));
         } else {
@@ -712,14 +715,49 @@ window.__ModuleLoader__.load({
       }
 
       function showAllModels() {
-        setVisibility({});
+        // Filter-aware: with a query active, only the matching models become
+        // visible (same scope as 反选/清空); without a query, show everything.
+        const active = modelFilter.trim() !== '';
+        if (!active) {
+          setVisibility({});
+          setVisMsg('');
+          return;
+        }
+        const next = { ...visibility };
+        for (const p of providers) {
+          const shown = visibleModelsFor(p.id).map((m) => m.id);
+          if (!shown.length) continue;
+          const all = providerModels(p.id).map((m) => m.id);
+          const current = visibility[p.id] === undefined ? all : visibility[p.id];
+          const merged = new Set(current);
+          for (const id of shown) merged.add(id);
+          if (merged.size >= all.length) delete next[p.id];
+          else next[p.id] = [...merged];
+        }
+        setVisibility(next);
         setVisMsg('');
       }
 
-      // Mirror of showAllModels: every provider collapses to an empty list.
+      // Mirror of showAllModels: with a filter active, hide only the matching
+      // models; without one, collapse every provider to an empty list.
       function hideAllModels() {
-        const next = {};
-        for (const p of providers) next[p.id] = [];
+        const active = modelFilter.trim() !== '';
+        if (!active) {
+          const next = {};
+          for (const p of providers) next[p.id] = [];
+          setVisibility(next);
+          setVisMsg('');
+          return;
+        }
+        const next = { ...visibility };
+        for (const p of providers) {
+          const shown = visibleModelsFor(p.id).map((m) => m.id);
+          if (!shown.length) continue;
+          const all = providerModels(p.id).map((m) => m.id);
+          const current = visibility[p.id] === undefined ? all : visibility[p.id];
+          const hide = new Set(shown);
+          next[p.id] = current.filter((id) => !hide.has(id));
+        }
         setVisibility(next);
         setVisMsg('');
       }
