@@ -949,6 +949,15 @@ function makeHandler(ctx, state) {
       return;
     }
     let pathname = url.pathname;
+    // TEMPORARY diagnostic (remove before release): record what clients send.
+    try {
+      fs.appendFileSync(
+        path.join(os.tmpdir(), 'dsh-gateway-requests.log'),
+        `${new Date().toISOString()} ${req.method} ${req.url} auth=${req.headers?.authorization ? 'y' : 'n'} ct=${req.headers?.['content-type'] ?? ''}\n`,
+      );
+    } catch {
+      /* diagnostics must never break requests */
+    }
     // Short aliases on the standalone LAN listener: /v1/* and /config.
     if (pathname === '/config' || pathname.startsWith('/v1/')) {
       pathname = PRIMARY + pathname;
@@ -1186,6 +1195,12 @@ function makeHandler(ctx, state) {
         return;
       }
       const model = String(body.model ?? '');
+      // TEMPORARY diagnostic (remove before release): capture the exact body.
+      try {
+        fs.writeFileSync(path.join(os.tmpdir(), 'dsh-gateway-last-body.json'), JSON.stringify(body, null, 1), 'utf8');
+      } catch {
+        /* ignore */
+      }
       if (!model) {
         openAiError(res, 400, 'model is required', 'bad_request_error');
         return;
@@ -1315,7 +1330,20 @@ function makeHandler(ctx, state) {
           if (route) {
             await streamRoute(ctx, route, opts, controller.signal, state, emit);
           } else {
-            await streamSingleModel(ctx, single.provider, single.modelId, opts, controller.signal, emit);
+            // Single-model calls have no chain to fall back on; retry once when
+            // the upstream adapter fails before anything was emitted (seen with
+            // occasional deepseek-account `replayState` failures).
+            let emitted = false;
+            const track = (ev) => {
+              if (ev.kind === 'text' || ev.kind === 'reasoning' || ev.kind === 'tool-open') emitted = true;
+              emit(ev);
+            };
+            try {
+              await streamSingleModel(ctx, single.provider, single.modelId, opts, controller.signal, track);
+            } catch (error) {
+              if (emitted) throw error;
+              await streamSingleModel(ctx, single.provider, single.modelId, opts, controller.signal, track);
+            }
           }
           send({}, sawTool ? 'tool_calls' : 'stop');
           res.write('data: [DONE]\n\n');
@@ -1331,7 +1359,13 @@ function makeHandler(ctx, state) {
           usedModel = `${hit.provider || 'unknown'}/${hit.model || '?'}`;
         } else {
           const { provider, modelId } = single;
-          const r = await callSingleModel(ctx, provider, modelId, opts, controller.signal);
+          let r;
+          try {
+            r = await callSingleModel(ctx, provider, modelId, opts, controller.signal);
+          } catch (error) {
+            // One retry for transient adapter failures on the direct path.
+            r = await callSingleModel(ctx, provider, modelId, opts, controller.signal);
+          }
           result = { text: r.text, toolCalls: r.toolCalls, model: { provider, model: modelId } };
           usedModel = `${provider}/${modelId}`;
         }
@@ -1368,6 +1402,14 @@ function makeHandler(ctx, state) {
         });
         return;
       } catch (error) {
+        try {
+          fs.appendFileSync(
+            path.join(os.tmpdir(), 'dsh-gateway-requests.log'),
+            `  ERROR ${String(error?.message ?? error)}\n`,
+          );
+        } catch {
+          /* ignore */
+        }
         if (heartbeat) {
           clearInterval(heartbeat);
           heartbeat = null;
