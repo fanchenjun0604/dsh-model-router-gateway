@@ -229,6 +229,7 @@ window.__ModuleLoader__.load({
 
     function ModelRouterGatewayCard(props) {
       const view = props && props.view;
+      const showNavToggle = !(props && props.showNavToggle === false);
       const React_ = React;
       const useRef = React_.useRef;
       const useMemo = React_.useMemo;
@@ -897,28 +898,17 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { color: '#dc2626', fontSize: 13, margin: '6px 0' } }, error)
           : null,
 
-        // -------- intro: one sentence, then the full guide right below it --------
-        h('div', { style: { ...styles.card, marginTop: 6 } },
-          h('div', { style: { fontSize: 13, lineHeight: 1.5 } },
-            '给 DSH 的全部模型做顺序降级路由，经 OpenAI 兼容网关暴露给外部客户端。详情见下方。'),
-          h('div', {
-            style: { ...styles.providerHeader, borderBottom: 'none', cursor: 'pointer', marginTop: 6 },
-            onClick: toggleDocs,
-          },
-            h('div', { style: { fontWeight: 600 } }, '完整使用说明 / Full guide'),
-            h('span', { style: styles.muted }, docsOpen ? '收起' : '展开'),
-          ),
-          docsOpen
-            ? h('pre', { style: styles.docsPre },
-                docsLoading ? '加载中…' : (docsText || '（文档不可用）'))
-            : null,
-        ),
+        // -------- one-line context (the host plugin page keeps the full guide) --------
+        h('div', { style: { ...styles.muted, marginTop: 6 } },
+          '给 DSH 的全部模型做顺序降级路由，经 OpenAI 兼容网关暴露给外部客户端。'),
 
         // -------- sidebar navigation toggle (settings page is the default home) --------
-        h('div', { style: { ...styles.card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 } },
+        !showNavToggle
+          ? null
+          : h('div', { style: { ...styles.card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 } },
           h('div', null,
             h('div', { style: { fontWeight: 600, fontSize: 13 } }, '在侧边导航中显示 / Show in sidebar'),
-            h('div', { style: styles.muted }, '默认只在「设置」里打开；开启后左侧导航会多一个入口，插件详情页保持只介绍。'),
+            h('div', { style: styles.muted }, '点击开启后，入口会固定在左侧导航栏；关闭后仅保留在设置页。'),
           ),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 } },
             navMsg ? h('span', { style: styles.muted }, navMsg) : null,
@@ -1438,7 +1428,7 @@ window.__ModuleLoader__.load({
                       padding: '16px 16px 40px',
                     },
                   },
-                  h(ModelRouterGatewayCard, { view: 'page', nav }),
+                  h(ModelRouterGatewayCard, { view: 'page', nav, showNavToggle: false }),
                 ),
             ),
           );
