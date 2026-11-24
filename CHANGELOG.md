@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Management UI moved out of the plugin page**: the operations card now lives
+  in a dedicated Settings page (`设置 → 模型路由网关`). The plugin detail page
+  keeps the host's description/README only. A Settings-page switch can pin an
+  optional entry to the left sidebar (`main` panel + `sidebar.panellist`), and
+  the choice persists as `navEnabled` in the state file; the sidebar panel
+  hides the switch, so the Settings page stays the single control.
 - **True streaming**: with `stream: true` the gateway now forwards upstream
   token deltas as OpenAI SSE chunks as they are generated, instead of
   buffering the whole answer and slicing it afterwards. First-token latency
