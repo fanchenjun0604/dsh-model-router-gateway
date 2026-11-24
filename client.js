@@ -244,6 +244,7 @@ window.__ModuleLoader__.load({
       const [editing, setEditing] = useState(null);
       const [draftId, setDraftId] = useState('');
       const [draftName, setDraftName] = useState('');
+      const [draftStrategy, setDraftStrategy] = useState('fallback');
       const [draftModels, setDraftModels] = useState([{ provider: '', model: '' }]);
       const [settingsDraft, setSettingsDraft] = useState({
         defaultTimeoutMs: 60000,
@@ -357,6 +358,7 @@ window.__ModuleLoader__.load({
         setEditing(null);
         setDraftId('');
         setDraftName('');
+        setDraftStrategy('fallback');
         setDraftModels([{ provider: '', model: '' }]);
         setFormError('');
       }
@@ -368,6 +370,7 @@ window.__ModuleLoader__.load({
         setEditing(null);
         setDraftId('');
         setDraftName('');
+        setDraftStrategy('fallback');
         setDraftModels([{ provider: '', model: '' }]);
         setFormError('');
         setFormOpen(true);
@@ -378,6 +381,7 @@ window.__ModuleLoader__.load({
         setFormOpen(true);
         setDraftId(route.id || '');
         setDraftName(route.name || '');
+        setDraftStrategy(route.strategy === 'round-robin' ? 'round-robin' : 'fallback');
         const models = Array.isArray(route.models) && route.models.length
           ? route.models.map((m) => ({ provider: m.provider || '', model: m.model || '' }))
           : [{ provider: '', model: '' }];
@@ -425,7 +429,7 @@ window.__ModuleLoader__.load({
                 'content-type': 'application/json',
                 authorization: `Bearer ${savedKey}`,
               },
-              body: JSON.stringify({ name, models }),
+              body: JSON.stringify({ name, models, strategy: draftStrategy }),
             });
             resetDraft();
             await load();
@@ -451,7 +455,7 @@ window.__ModuleLoader__.load({
               'content-type': 'application/json',
               authorization: `Bearer ${savedKey}`,
             },
-            body: JSON.stringify({ id, name, models }),
+            body: JSON.stringify({ id, name, models, strategy: draftStrategy }),
           });
           resetDraft();
           await load();
@@ -1024,7 +1028,7 @@ window.__ModuleLoader__.load({
                   h('div', null,
                     h('div', { style: { fontWeight: 600 } }, route.name || route.id),
                     h('div', { style: styles.muted },
-                      `${route.enabled === false ? '已禁用' : '运行中'} · ${(route.models || []).length} 个模型`),
+                      `${route.enabled === false ? '已禁用' : '运行中'} · ${(route.models || []).length} 个模型${route.strategy === 'round-robin' ? ' · 轮询' : ''}`),
                   ),
                   h('div', { style: styles.row },
                     masked
@@ -1138,6 +1142,21 @@ window.__ModuleLoader__.load({
             placeholder: '例如：默认降级路由',
             style: styles.input,
           }),
+          h('label', {
+            style: { display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10, cursor: 'pointer' },
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: draftStrategy === 'round-robin',
+              onChange: (e) => setDraftStrategy(e.target.checked ? 'round-robin' : 'fallback'),
+              style: { marginTop: 2 },
+            }),
+            h('span', null,
+              h('span', { style: { fontSize: 13 } }, '轮询负载均衡 / Round-robin'),
+              h('span', { style: { ...styles.muted, display: 'block', marginTop: 2 } },
+                '每次请求轮换起始模型；失败仍按顺序降级。默认关闭（固定从第一个开始）。'),
+            ),
+          ),
           h('div', { style: { ...styles.label, marginTop: 10 } },
             '模型序列（按顺序尝试，失败自动切换下一个；拖 ⠿ 或点箭头调序）/ Ordered fallback chain (drag ⠿ or use arrows)'),
           draftModels.map((m, i) =>

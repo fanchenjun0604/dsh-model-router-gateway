@@ -359,7 +359,7 @@ async function streamSingleModel(ctx, provider, model, opts, signal, emit) {
 async function streamRoute(ctx, route, opts, signal, state, emit) {
   const { timeoutMs, maxRetry, failures } = state;
   const now = Date.now();
-  const models = Array.isArray(route.models) ? route.models : [];
+  const models = routeOrder(route, route.models, state);
   const errors = [];
   for (const ref of models) {
     if (!ref || !ref.provider || !ref.model) continue;
@@ -452,12 +452,27 @@ async function callSingleModel(ctx, provider, model, opts, signal) {
   return { text, toolCalls: calls };
 }
 
+/**
+ * Ordered attempt list for one call. `fallback` keeps the declared order; in
+ * `round-robin` mode the starting point rotates per request while failures
+ * still walk the rest of the chain.
+ */
+function routeOrder(route, models, state) {
+  const list = Array.isArray(models) ? models : [];
+  if (route.strategy !== 'round-robin' || list.length < 2) return list;
+  const key = String(route.id ?? '');
+  const prev = state.routeCursor.get(key) ?? 0;
+  const start = ((prev % list.length) + list.length) % list.length;
+  state.routeCursor.set(key, start + 1);
+  return list.slice(start).concat(list.slice(0, start));
+}
+
 async function callRoute(ctx, route, opts, signal, state) {
   const { timeoutMs, maxRetry, failures } = state;
   const errors = [];
   const skipped = [];
   const now = Date.now();
-  const models = Array.isArray(route.models) ? route.models : [];
+  const models = routeOrder(route, route.models, state);
   for (const ref of models) {
     if (!ref || !ref.provider || !ref.model) continue;
     const key = `${ref.provider}/${ref.model}`;
@@ -1425,6 +1440,7 @@ async function handleAdmin(req, res, pathname, state, ctx) {
         id: routeId,
         name: String(body.name ?? routeId),
         models: normalizeModels(body.models),
+        strategy: body.strategy === 'round-robin' ? 'round-robin' : 'fallback',
         enabled: body.enabled !== false,
       };
       routes.set(routeId, route);
@@ -1455,6 +1471,7 @@ async function handleAdmin(req, res, pathname, state, ctx) {
     }
     if (body.name !== undefined) route.name = String(body.name);
     if (body.models !== undefined) route.models = normalizeModels(body.models);
+    if (body.strategy === 'round-robin' || body.strategy === 'fallback') route.strategy = body.strategy;
     if (body.enabled !== undefined) route.enabled = body.enabled !== false;
     persistSettings(ctx, state);
     json(res, 200, { ok: true, route });
@@ -1518,6 +1535,7 @@ export function apply(ctx, config) {
       id: r.id,
       name: String(r.name ?? r.id),
       models: normalizeModels(r.models),
+      strategy: r.strategy === 'round-robin' ? 'round-robin' : 'fallback',
       enabled: r.enabled !== false,
     });
   }
@@ -1543,6 +1561,7 @@ export function apply(ctx, config) {
     modelVisibility,
     navEnabled: cfg.navEnabled === true,
     failures: new Map(),
+    routeCursor: new Map(),
     version: readInstalledVersion(),
     pending: null,
     update: {
@@ -1583,6 +1602,7 @@ export function apply(ctx, config) {
           id: r.id,
           name: String(r.name ?? r.id),
           models: normalizeModels(r.models),
+          strategy: r.strategy === 'round-robin' ? 'round-robin' : 'fallback',
           enabled: r.enabled !== false,
         });
       }
