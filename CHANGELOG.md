@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Multiple gateway keys with optional route scope**: the existing single key
+  keeps full access; additional keys can be added in Settings. A key with no
+  scope behaves exactly like the default key, while a key bound to one route
+  only sees that route in `/v1/models` and may only call it (direct
+  `provider:model` calls and admin operations are refused). Keys persist in the
+  state file and are managed from the Settings page (add / delete / scope /
+  save).
 - **Per-route round-robin**: a route can be switched from ordered fallback to
   round-robin, which rotates the starting model on every request while failures
   still walk the rest of the chain. Exposed as a checkbox in the route form and
