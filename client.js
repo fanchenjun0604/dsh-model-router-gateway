@@ -1426,7 +1426,20 @@ window.__ModuleLoader__.load({
           offs.push(
             ctx.slots.register(
               { name: 'main', key: NS, locale: NS, inject: () => ({ ctx }) },
-              () => h(ModelRouterGatewayCard, { view: 'page', nav }),
+              () =>
+                h(
+                  'div',
+                  {
+                    style: {
+                      height: '100%',
+                      overflowY: 'auto',
+                      overscrollBehavior: 'contain',
+                      boxSizing: 'border-box',
+                      padding: '16px 16px 40px',
+                    },
+                  },
+                  h(ModelRouterGatewayCard, { view: 'page', nav }),
+                ),
             ),
           );
         } catch {
