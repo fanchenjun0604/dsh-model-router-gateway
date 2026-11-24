@@ -735,6 +735,14 @@ window.__ModuleLoader__.load({
         return v.includes(mid);
       }
 
+      /** "名称 (id)" for places where the user has to match a route by eye. */
+      function routeDisplay(id) {
+        if (!id) return '';
+        const r = routes.find((x) => x.id === id);
+        if (!r) return id;
+        return `${r.name || r.id} (${r.id})`;
+      }
+
       // 1.0.5 filter box: display-layer only. Checked state is untouched by
       // filtering; bulk buttons act on the filtered subset of one provider.
       function filterMatches(m) {
@@ -979,7 +987,7 @@ window.__ModuleLoader__.load({
           (keysDraft || []).map((k, i) =>
             h('div', { key: i, style: { ...styles.row, marginTop: 6, alignItems: 'center' } },
               h('span', { style: { fontWeight: 600, minWidth: 70 } }, k.name || 'key'),
-              h('span', { style: { ...styles.muted, flex: 1 } }, k.route ? `仅路由 ${k.route}` : '全部路由'),
+              h('span', { style: { ...styles.muted, flex: 1 } }, k.route ? `仅路由 ${routeDisplay(k.route)}` : '全部路由'),
               h('span', { style: { ...styles.muted, fontFamily: 'monospace', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: k.key },
                 k.key.slice(0, 10) + '…'),
               h('button', {
@@ -1002,7 +1010,7 @@ window.__ModuleLoader__.load({
               style: { ...styles.input, width: 130 },
             },
               h('option', { value: '' }, '全部路由'),
-              routes.map((r) => h('option', { key: r.id, value: r.id }, r.id)),
+              routes.map((r) => h('option', { key: r.id, value: r.id }, `${r.name || r.id} (${r.id})`)),
             ),
             h('input', {
               value: keyValue,
@@ -1125,10 +1133,16 @@ window.__ModuleLoader__.load({
                 h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
                   h('div', null,
                     h('div', { style: { fontWeight: 600 } }, route.name || route.id),
+                    h('div', { style: { ...styles.muted, fontFamily: 'monospace', marginTop: 2 } }, `ID: ${route.id}`),
                     h('div', { style: styles.muted },
                       `${route.enabled === false ? '已禁用' : '运行中'} · ${(route.models || []).length} 个模型${route.strategy === 'round-robin' ? ' · 轮询' : ''}`),
                   ),
                   h('div', { style: styles.row },
+                    h('button', {
+                      type: 'button',
+                      style: styles.btn,
+                      onClick: () => copyText('route:' + route.id, route.id),
+                    }, copied === 'route:' + route.id ? '已复制' : '复制 ID'),
                     masked
                       ? null
                       : h('button', { type: 'button', style: styles.btn, onClick: () => startEdit(route) }, '编辑'),
