@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Per-route round-robin**: a route can be switched from ordered fallback to
+  round-robin, which rotates the starting model on every request while failures
+  still walk the rest of the chain. Exposed as a checkbox in the route form and
+  persisted as `route.strategy` (`fallback` by default).
 - **Tool calling passthrough**: OpenAI `tools` in the request are mapped to the
   harness `GenerateOptions.tools`; streamed `tool-call-delta` chunks become
   `delta.tool_calls` (id/name first, arguments incremental), buffered replies
