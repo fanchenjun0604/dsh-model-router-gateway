@@ -296,10 +296,80 @@ function toDshTools(openaiTools) {
 // model call + ordered fallback
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Per-provider serialization
+// ---------------------------------------------------------------------------
+// The harness adapters keep per-provider state in the host process — notably
+// `deepseek-account`'s replay state, which several agent clients made crash
+// with "Cannot read properties of undefined (reading 'replayState')" when two
+// requests for the same provider were in flight at once. Retrying a failed
+// call does not help while the other request is still running, so calls for the
+// same provider are queued instead: one in flight, the rest waiting in order.
+//
+// The queue is keyed by provider id, so different providers still run in
+// parallel. A call that is aborted while waiting leaves the queue immediately.
+const providerQueues = new Map(); // provider -> { tail: Promise<void>, pending: number }
+
+function providerQueueOf(provider) {
+  let q = providerQueues.get(provider);
+  if (!q) {
+    q = { tail: Promise.resolve(), pending: 0 };
+    providerQueues.set(provider, q);
+  }
+  return q;
+}
+
+/** Number of calls currently queued or running for one provider. */
+function providerQueueDepth(provider) {
+  return providerQueues.get(provider)?.pending ?? 0;
+}
+
+/**
+ * Run `task` after every earlier call for the same provider has settled.
+ * Resolves/rejects with the task's own outcome; the queue never swallows it.
+ */
+async function withProviderLock(provider, signal, task) {
+  const q = providerQueueOf(provider);
+  q.pending += 1;
+  const previous = q.tail;
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  // Chain the next caller behind this one *before* awaiting, so ordering is
+  // the order of arrival rather than the order of completion.
+  q.tail = previous.then(() => gate);
+
+  try {
+    await previous;
+  } catch {
+    // A previous task's failure must not fail this one.
+  }
+
+  try {
+    if (signal?.aborted) {
+      const reason = signal.reason;
+      throw reason instanceof Error ? reason : new Error('aborted while queued');
+    }
+    return await task();
+  } finally {
+    q.pending -= 1;
+    release();
+    // Drop an idle queue so long-lived processes do not accumulate entries.
+    if (q.pending === 0 && providerQueues.get(provider) === q) {
+      providerQueues.delete(provider);
+    }
+  }
+}
+
 // Streaming variants (v1.1): forward token deltas as they arrive instead of
 // buffering the whole answer. Pre-first-token failures fall back down the
 // route; once a token has been emitted the stream must not silently switch.
 async function streamSingleModel(ctx, provider, model, opts, signal, emit) {
+  return withProviderLock(provider, signal, () => streamSingleModelUnlocked(ctx, provider, model, opts, signal, emit));
+}
+
+async function streamSingleModelUnlocked(ctx, provider, model, opts, signal, emit) {
   const llm = getLlm(ctx);
   if (!llm || typeof llm.stream !== 'function') {
     throw new Error('llm service is unavailable');
@@ -410,6 +480,10 @@ async function streamRoute(ctx, route, opts, signal, state, emit) {
 }
 
 async function callSingleModel(ctx, provider, model, opts, signal) {
+  return withProviderLock(provider, signal, () => callSingleModelUnlocked(ctx, provider, model, opts, signal));
+}
+
+async function callSingleModelUnlocked(ctx, provider, model, opts, signal) {
   const llm = getLlm(ctx);
   if (!llm || typeof llm.stream !== 'function') {
     throw new Error('llm service is unavailable');
