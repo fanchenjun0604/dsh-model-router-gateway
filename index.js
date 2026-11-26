@@ -254,17 +254,24 @@ function toDshMessages(openaiMessages) {
       content = [{ type: 'text', text: String(m.content ?? '') }];
     }
 
-    // Assistant turns may carry tool calls from earlier steps; keep them so
-    // the upstream sees the call/result pairs it produced.
-    if (role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
-      for (const tc of m.tool_calls) {
-        if (!tc || !tc.function) continue;
-        content.push({
-          type: 'tool-call',
-          id: String(tc.id ?? ''),
-          name: String(tc.function.name ?? ''),
-          arguments: String(tc.function.arguments ?? ''),
-        });
+    // Assistant turns must carry a model `source`: the harness adapters read
+    // `message.source.replayState` off replayed assistant history, and a plain
+    // `{ role, content }` makes that read throw "Cannot read properties of
+    // undefined (reading 'replayState')". `replayState` itself is optional, so
+    // a synthetic source is enough — it must exist, not carry a replay.
+    if (role === 'assistant') {
+      // Assistant turns may carry tool calls from earlier steps; keep them so
+      // the upstream sees the call/result pairs it produced.
+      if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+        for (const tc of m.tool_calls) {
+          if (!tc || !tc.function) continue;
+          content.push({
+            type: 'tool-call',
+            id: String(tc.id ?? ''),
+            name: String(tc.function.name ?? ''),
+            arguments: String(tc.function.arguments ?? ''),
+          });
+        }
       }
       return {
         role,
