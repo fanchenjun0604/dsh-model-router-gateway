@@ -33,7 +33,12 @@ DSH 每个模型流以终结 chunk 收尾：成功，或带类型失败（QUOTA�
 AUTH、SERVER、TIMEOUT…）。首 token 之前的任何失败、超时、空回答都视为
 "该模型当前不可用"，自动切到链条下一个，对话无感知。响应体 model 字段
 回显实际作答的模型。token 用量按字符估算（免费渠道通常不回报真实值）。
-当前为伪流式：上游聚合后按 28 字符切片发 SSE。
+流式为真转发：`stream: true` 时上游的 text/reasoning delta 一到就转成
+OpenAI SSE chunk；首 token 之后失败改为发 SSE `error` 事件，不静默换模型。
+
+同一 provider 的调用在本进程内串行（FIFO，同时只有一个在飞）：宿主适配器
+把每个 provider 的状态放在进程里，并发请求会互相踩踏。不同 provider 之间
+仍然并行；排队中的请求被取消会立即退出，一次失败也不会阻塞队列里的后续请求。
 
 ## 路由 ID 约定
 
@@ -67,9 +72,10 @@ profile 的 cordis.patch.yml 里：
 
 ## 已知限制 / 路线图
 
-- tool/function calling 暂不转发（v1.2+ 候选）。
-- 真流式（首 token 即转发，降级窗口=首 token 前）在 v1.1 计划中。
-- 轮询/负载均衡、按请求类型分流、多 Key、上下文摘要省 token 在候选池。
+- 仅转发文本：`image_url` 消息替换为文本占位。
+- tool/function calling 已透传（v1.1）；仅文本内容的工具结果会被转发，非文本内容按占位处理。
+- 真流式已上线（v1.1）：首 token 即转发，降级窗口=首 token 之前。
+- 轮询已上线（v1.1，按路由可选）；按请求类型分流、上下文摘要省 token 仍在候选池。
 
 ## 自升级
 

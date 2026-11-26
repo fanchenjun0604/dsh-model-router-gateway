@@ -3,7 +3,19 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 1.1.0 — Unreleased（攒批中）
+## 1.1.1 — 2026-11-26
+
+### Fixed
+
+- **Documentation described the pre-1.1 behaviour**: the README still said
+  tool calling was not forwarded and that streaming was buffered pseudo-stream,
+  and `docs/usage.md` listed true streaming, tool calling and round-robin as
+  roadmap items even though all three shipped in 1.1.0. Both documents now
+  describe what the gateway actually does, and the roadmap lists only the
+  features that are still missing (text-only forwarding, request-type routing,
+  context summarization).
+
+## 1.1.0 — 2026-11-26
 
 ### Added
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-router-gateway",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "DSH 全模型顺序降级路由，经 OpenAI 兼容网关对外暴露（BaseURL + Key）。",
   "homepage": "https://www.npmjs.com/package/dsh-model-router-gateway",
   "repository": {

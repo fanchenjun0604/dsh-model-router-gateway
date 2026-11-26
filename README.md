@@ -31,4 +31,12 @@ dsh plugin --profile <你的profile> add dsh-model-router-gateway
 | API Key | 你的网关 Key |
 | Model | 路由组 ID（如 `default`）或 `provider:model` |
 
-**许可**：MIT。tool/function calling 暂未转发；当前为聚合后伪流式（真流式在 v1.1 计划中）。
+**流式**：`stream: true` 时按上游 token delta 实时转发（首 token 通常 1–3 秒），
+不再等整段回答生成完；首个 token 之前的失败会沿降级链切换，之后失败则以
+SSE `error` 事件结束，不会静默换模型。
+
+**工具调用**：OpenAI `tools` 透传给上游；流式返回 `delta.tool_calls`，
+非流式返回 `message.tool_calls` 与 `finish_reason: "tool_calls"`，
+`role: "tool"` 的历史也能回到上游。Agent 客户端（DeepWrite 等）的工具循环可完整跑通。
+
+**许可**：MIT。
