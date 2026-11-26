@@ -46,6 +46,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   per-provider 全选 and the top-level 全部显示/全部隐藏 now act only on the
   models matching the filter, consistent with 反选/清空 (previously they
   touched unshown models).
+- **Conversations with history no longer fail on replay**: replayed assistant
+  turns were sent upstream without a `source`, so the harness adapter read
+  `undefined.source.replayState` and every request carrying assistant history
+  failed with `Cannot read properties of undefined (reading 'replayState')`.
+  A plain `{ role, content }` turn only worked when the history held no
+  assistant message, which is why short new conversations worked and real
+  ones did not. Every assistant turn now carries the synthetic model source
+  (`replayState` itself stays optional). Agent clients such as DeepWrite can
+  now hold a multi-turn conversation through the gateway.
+- **Calls are serialized per provider**: `deepseek-account` and similar
+  adapters keep per-provider state in the host process, and two in-flight
+  requests could corrupt it. Calls for one provider now queue (FIFO, one in
+  flight); different providers still run in parallel, a queued call that is
+  aborted leaves immediately, and a failed call does not poison the queue.
 
 ## 1.0.6 — 2026-11-23
 
